@@ -303,5 +303,5 @@ app.post("/scrape-menu", async (req, res) => {
     }
 });
 
-const PORT = 5179;
+const PORT = process.env.PORT || 5179;
 app.listen(PORT, () => console.log(`Scraper API running at http://localhost:${PORT}`));
