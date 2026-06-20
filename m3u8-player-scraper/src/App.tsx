@@ -15,7 +15,7 @@ import {
 } from "@chakra-ui/react";
 import VideoPlayer from "./components/VideoPlayer";
 
-const API_URL = "http://localhost:5179";
+const API_URL = import.meta.env.VITE_API_URL || "http://localhost:5179";
 const SOURCE_HISTORY_KEY = "m3u8_source_history";
 
 type Mode = "direct" | "menu";
