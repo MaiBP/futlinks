@@ -3,7 +3,44 @@ import cors from "cors";
 import { chromium } from "playwright";
 
 const app = express();
-app.use(cors());
+
+const allowedOrigins = (process.env.ALLOWED_ORIGINS || "")
+    .split(",")
+    .map((origin) => origin.trim())
+    .filter(Boolean);
+
+function isOriginAllowed(origin) {
+    if (!origin) return true;
+    if (allowedOrigins.length === 0) return true;
+    return allowedOrigins.includes(origin);
+}
+
+app.use((req, res, next) => {
+    const origin = req.headers.origin;
+
+    if (isOriginAllowed(origin)) {
+        res.header("Access-Control-Allow-Origin", origin || "*");
+    }
+
+    res.header("Vary", "Origin");
+    res.header("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
+    res.header("Access-Control-Allow-Headers", "Content-Type,Authorization");
+    res.header("Access-Control-Max-Age", "86400");
+
+    if (req.method === "OPTIONS") return res.sendStatus(204);
+
+    return next();
+});
+
+app.use(cors({
+    origin(origin, callback) {
+        if (isOriginAllowed(origin)) return callback(null, true);
+        return callback(new Error("Not allowed by CORS"));
+    },
+    methods: ["GET", "POST", "OPTIONS"],
+    allowedHeaders: ["Content-Type", "Authorization"],
+    optionsSuccessStatus: 204,
+}));
 app.use(express.json({ limit: "2mb" }));
 
 function isPlaylistUrl(url) {
