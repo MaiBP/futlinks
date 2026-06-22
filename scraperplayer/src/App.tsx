@@ -93,6 +93,73 @@ function parseBulkSources(text: string) {
   return normalizeSourceUrls(matches);
 }
 
+function extractSourceUrlsFromJson(value: unknown): string[] {
+  if (typeof value === "string") return parseBulkSources(value);
+
+  if (Array.isArray(value)) {
+    return normalizeSourceUrls(value.flatMap((item) => extractSourceUrlsFromJson(item)));
+  }
+
+  if (isRecord(value)) {
+    return normalizeSourceUrls(Object.values(value).flatMap((item) => extractSourceUrlsFromJson(item)));
+  }
+
+  return [];
+}
+
+function base64ToBytes(value: string) {
+  const binary = window.atob(value);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i += 1) bytes[i] = binary.charCodeAt(i);
+  return bytes;
+}
+
+function looksEncryptedSourceFile(value: unknown): value is Record<string, unknown> {
+  return (
+    isRecord(value) &&
+    typeof value.ciphertext === "string" &&
+    typeof value.iv === "string" &&
+    typeof value.salt === "string"
+  );
+}
+
+async function decryptSourcesJson(encrypted: Record<string, unknown>, passphrase: string) {
+  const salt = base64ToBytes(String(encrypted.salt));
+  const iv = base64ToBytes(String(encrypted.iv));
+  const ciphertext = base64ToBytes(String(encrypted.ciphertext));
+  const iterations = typeof encrypted.iterations === "number" ? encrypted.iterations : 250000;
+  const encodedPassphrase = new TextEncoder().encode(passphrase);
+
+  const passwordKey = await window.crypto.subtle.importKey("raw", encodedPassphrase, "PBKDF2", false, [
+    "deriveKey",
+  ]);
+  const aesKey = await window.crypto.subtle.deriveKey(
+    { name: "PBKDF2", salt, iterations, hash: "SHA-256" },
+    passwordKey,
+    { name: "AES-GCM", length: 256 },
+    false,
+    ["decrypt"]
+  );
+  const decrypted = await window.crypto.subtle.decrypt({ name: "AES-GCM", iv }, aesKey, ciphertext);
+  const text = new TextDecoder().decode(decrypted);
+  return JSON.parse(text) as unknown;
+}
+
+async function readImportedSourceUrls(fileText: string, passphrase: string) {
+  const parsed = JSON.parse(fileText) as unknown;
+
+  if (looksEncryptedSourceFile(parsed)) {
+    if (!passphrase.trim()) {
+      throw new Error("Enter the file key before importing the encrypted JSON.");
+    }
+
+    const decrypted = await decryptSourcesJson(parsed, passphrase.trim());
+    return extractSourceUrlsFromJson(decrypted);
+  }
+
+  return extractSourceUrlsFromJson(parsed);
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
 }
@@ -219,6 +286,7 @@ export default function App() {
   const [sourceUrl, setSourceUrl] = useState("");
 
   const [sourceFileName, setSourceFileName] = useState("");
+  const [sourceFilePassword, setSourceFilePassword] = useState("");
   const [sourceEntries, setSourceEntries] = useState<SourceEntry[]>([]);
   const [bulkChecking, setBulkChecking] = useState(false);
   const [bulkProgress, setBulkProgress] = useState({ done: 0, total: 0 });
@@ -376,13 +444,13 @@ export default function App() {
   }
 
   async function checkImportedSources(fileText: string, fileName: string) {
-    const imported = parseBulkSources(fileText);
+    const imported = await readImportedSourceUrls(fileText, sourceFilePassword);
 
     if (imported.length === 0) {
       setNotice({
         type: "error",
         title: "No source URLs found",
-        message: "The selected .txt file does not contain valid source URLs.",
+        message: "The selected JSON file does not contain valid source URLs.",
       });
       setTimeout(() => setNotice(null), 4500);
       return;
@@ -424,12 +492,12 @@ export default function App() {
 
     if (!file) return;
 
-    const isTextFile = file.name.toLowerCase().endsWith(".txt") || file.type === "text/plain";
-    if (!isTextFile) {
+    const isJsonFile = file.name.toLowerCase().endsWith(".json") || file.type === "application/json" || file.type === "";
+    if (!isJsonFile) {
       setNotice({
         type: "error",
         title: "Invalid file",
-        message: "Select a .txt file with one or more source URLs.",
+        message: "Select an encrypted .json file with source URLs.",
       });
       setTimeout(() => setNotice(null), 4500);
       return;
@@ -729,12 +797,27 @@ export default function App() {
                 Import sources
               </Text>
               <Badge bg="gray.100" color="gray.700" borderRadius="6px">
-                .txt
+                encrypted .json
               </Badge>
             </HStack>
             <Input
+              value={sourceFilePassword}
+              onChange={(e) => setSourceFilePassword(e.target.value)}
+              type="password"
+              placeholder="File key"
+              size={{ base: "sm", md: "md" }}
+              mb={2}
+              bg="gray.50"
+              borderColor="gray.200"
+              borderRadius="8px"
+              _focusVisible={{
+                borderColor: "teal.500",
+                boxShadow: "0 0 0 1px var(--chakra-colors-teal-500)",
+              }}
+            />
+            <Input
               type="file"
-              accept=".txt,text/plain"
+              accept=".json,application/json"
               disabled={bulkChecking}
               onChange={handleSourceFileChange}
               size={{ base: "sm", md: "md" }}
@@ -752,7 +835,7 @@ export default function App() {
               <Text fontSize="xs" color="gray.500">
                 {bulkChecking
                   ? `Checking ${bulkProgress.done}/${bulkProgress.total}`
-                  : sourceFileName || "Select a text file with source URLs"}
+                  : sourceFileName || "Select an encrypted JSON source file"}
               </Text>
             </HStack>
           </Box>
