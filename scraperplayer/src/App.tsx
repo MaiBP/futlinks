@@ -472,8 +472,6 @@ export default function App() {
     if (entry.status !== "active" || !entry.streamUrl) return;
 
     setSidebarOpen(false);
-    setSourceUrl(entry.sourceUrl);
-    setMode("direct");
     setSelected((current) => {
       if (current === entry.streamUrl) setPlayerRevision((revision) => revision + 1);
       return entry.streamUrl;
