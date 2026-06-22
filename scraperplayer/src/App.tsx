@@ -21,8 +21,6 @@ const SOURCE_HISTORY_KEY = "scraperplayer_source_history";
 const PLAYLIST_LINKS_KEY = "scraperplayer_playlist_links";
 const SOURCE_ENTRIES_KEY = "scraperplayer_source_entries";
 
-type Mode = "direct" | "menu";
-
 type Notice = {
   type: "success" | "error" | "info";
   title: string;
@@ -219,11 +217,6 @@ function getErrorMessage(error: unknown) {
 
 export default function App() {
   const [sourceUrl, setSourceUrl] = useState("");
-  const [mode, setMode] = useState<Mode>("direct");
-
-  const [menuSelector, setMenuSelector] = useState("ul.menu");
-  const [subSelector, setSubSelector] = useState("ul.menu li.subitem1 a");
-  const [limit, setLimit] = useState("");
 
   const [sourceFileName, setSourceFileName] = useState("");
   const [sourceEntries, setSourceEntries] = useState<SourceEntry[]>([]);
@@ -326,13 +319,13 @@ export default function App() {
     setSelectedSourceUrl(undefined);
   }
 
-  async function checkSourceUrl(source: string, modeToUse: Mode = "direct"): Promise<SourceEntry> {
+  async function checkSourceUrl(source: string): Promise<SourceEntry> {
     const [sourceUrl] = normalizeSourceUrls([source]);
     if (!sourceUrl) throw new Error("Invalid source URL");
 
     const checkedAt = new Date().toISOString();
 
-    if (modeToUse === "direct" && isPlaylistUrl(sourceUrl)) {
+    if (isPlaylistUrl(sourceUrl)) {
       return {
         sourceUrl,
         status: "active",
@@ -343,18 +336,7 @@ export default function App() {
       };
     }
 
-    const endpoint = modeToUse === "direct" ? "/scrape-direct" : "/scrape-menu";
-    const payload =
-      modeToUse === "direct"
-        ? { url: sourceUrl }
-        : {
-          url: sourceUrl,
-          menuSelector,
-          subSelector,
-          ...(limit.trim() ? { limit: Number(limit) } : {}),
-        };
-
-    const res = await axios.post(`${API_URL}${endpoint}`, payload);
+    const res = await axios.post(`${API_URL}/scrape-direct`, { url: sourceUrl });
     const streams = normalizePlaylistUrls(res.data?.results || []);
     const streamUrl = streams[0];
 
@@ -371,14 +353,14 @@ export default function App() {
     };
   }
 
-  async function checkAndStoreSource(source: string, modeToUse: Mode = "direct") {
+  async function checkAndStoreSource(source: string) {
     const [sourceUrl] = normalizeSourceUrls([source]);
     if (!sourceUrl) return null;
 
     markSourceStatus(sourceUrl, "checking", { error: undefined });
 
     try {
-      const checked = await checkSourceUrl(sourceUrl, modeToUse);
+      const checked = await checkSourceUrl(sourceUrl);
       upsertSourceEntries([checked]);
       return checked;
     } catch (error) {
@@ -418,7 +400,7 @@ export default function App() {
 
     const results: SourceEntry[] = [];
     for (const source of imported) {
-      const checked = await checkAndStoreSource(source, "direct");
+      const checked = await checkAndStoreSource(source);
       if (checked) results.push(checked);
       setBulkProgress((current) => ({ ...current, done: current.done + 1 }));
     }
@@ -471,7 +453,6 @@ export default function App() {
   function handleSourcePlay(entry: SourceEntry) {
     if (entry.status !== "active" || !entry.streamUrl) return;
 
-    setSidebarOpen(false);
     setSelected((current) => {
       if (current === entry.streamUrl) setPlayerRevision((revision) => revision + 1);
       return entry.streamUrl;
@@ -518,9 +499,8 @@ export default function App() {
     });
   }
 
-  async function runScrape(customUrl?: string, customMode?: Mode) {
+  async function runScrape(customUrl?: string) {
     const urlToUse = customUrl || sourceUrl;
-    const modeToUse = customMode || mode;
 
     if (!urlToUse) return;
 
@@ -532,13 +512,10 @@ export default function App() {
       setNotice({
         type: "info",
         title: "Checking source...",
-        message:
-          modeToUse === "direct"
-            ? "Scanning page network for .m3u / .m3u8 links..."
-            : "Scanning menu items and sublinks...",
+        message: "Scanning page network for .m3u / .m3u8 links...",
       });
 
-      const checked = await checkAndStoreSource(urlToUse, modeToUse);
+      const checked = await checkAndStoreSource(urlToUse);
 
       if (checked?.status === "active" && checked.streamUrl) {
         setSelected(checked.streamUrl);
@@ -567,16 +544,29 @@ export default function App() {
 
   function renderStatusFilter(label: string, value: LinkStatus | "all", count: number, meta?: StatusMeta) {
     const active = statusFilter === value;
+    const activeBg =
+      value === "active"
+        ? "green.600"
+        : value === "inactive"
+          ? "red.600"
+          : value === "checking"
+            ? "yellow.500"
+            : value === "unknown"
+              ? "gray.700"
+              : "teal.600";
+    const activeColor = value === "checking" ? "gray.900" : "white";
 
     return (
       <Badge
         as="button"
-        bg={active ? meta?.bg ?? "teal.50" : "gray.100"}
-        color={active ? meta?.color ?? "teal.700" : "gray.700"}
+        bg={active ? activeBg : meta?.bg ?? "gray.100"}
+        color={active ? activeColor : meta?.color ?? "gray.700"}
         borderWidth="1px"
-        borderColor={active ? meta?.border ?? "teal.200" : "transparent"}
+        borderColor={active ? activeBg : meta?.border ?? "transparent"}
         borderRadius="6px"
         cursor="pointer"
+        px={2}
+        py={1}
         onClick={() => setStatusFilter(value)}
       >
         {label} {count}
@@ -656,41 +646,21 @@ export default function App() {
           </Box>
 
           <Box>
-            <Text fontSize="xs" fontWeight="semibold" color="gray.600" mb={2}>
-              Mode
-            </Text>
-            <Box bg="gray.100" borderWidth="1px" borderColor="gray.200" borderRadius="8px" p="1">
-              <HStack gap={1} wrap={{ base: "wrap", sm: "nowrap" }}>
-                <Button
-                  flex="1"
-                  minW="120px"
-                  size="sm"
-                  variant="ghost"
-                  bg={mode === "direct" ? "white" : "transparent"}
-                  color={mode === "direct" ? "gray.900" : "gray.600"}
-                  borderRadius="6px"
-                  boxShadow={mode === "direct" ? "sm" : "none"}
-                  _hover={{ bg: mode === "direct" ? "white" : "gray.200" }}
-                  onClick={() => setMode("direct")}
-                >
-                  Direct
-                </Button>
-                <Button
-                  flex="1"
-                  minW="120px"
-                  size="sm"
-                  variant="ghost"
-                  bg={mode === "menu" ? "white" : "transparent"}
-                  color={mode === "menu" ? "gray.900" : "gray.600"}
-                  borderRadius="6px"
-                  boxShadow={mode === "menu" ? "sm" : "none"}
-                  _hover={{ bg: mode === "menu" ? "white" : "gray.200" }}
-                  onClick={() => setMode("menu")}
-                >
-                  Menu / Nested
-                </Button>
-              </HStack>
-            </Box>
+            <HStack justify="space-between" align="center" mb={2}>
+              <Text fontSize="sm" fontWeight="semibold">
+                Source status
+              </Text>
+              <Badge bg="gray.100" color="gray.700" borderRadius="6px">
+                {sourceEntries.length}
+              </Badge>
+            </HStack>
+            <HStack gap={2} wrap="wrap">
+              {renderStatusFilter("All", "all", sourceEntries.length)}
+              {renderStatusFilter("Active", "active", sourceStats.active, getStatusMeta("active"))}
+              {renderStatusFilter("Inactive", "inactive", sourceStats.inactive, getStatusMeta("inactive"))}
+              {renderStatusFilter("Checking", "checking", sourceStats.checking, getStatusMeta("checking"))}
+              {renderStatusFilter("Untested", "unknown", sourceStats.unknown, getStatusMeta("unknown"))}
+            </HStack>
           </Box>
 
           <Box>
@@ -712,59 +682,6 @@ export default function App() {
             />
           </Box>
 
-          {mode === "menu" && (
-            <Box borderWidth="1px" borderColor="gray.200" borderRadius="8px" p={3} bg="gray.50">
-              <Text fontSize="sm" fontWeight="semibold" mb={3}>
-                Menu scrape settings
-              </Text>
-
-              <Text fontSize="xs" color="gray.600" mb={1}>
-                Menu selector
-              </Text>
-              <Input
-                value={menuSelector}
-                onChange={(e) => setMenuSelector(e.target.value)}
-                mb={3}
-                bg="white"
-                borderRadius="8px"
-                _focusVisible={{
-                  borderColor: "teal.500",
-                  boxShadow: "0 0 0 1px var(--chakra-colors-teal-500)",
-                }}
-              />
-
-              <Text fontSize="xs" color="gray.600" mb={1}>
-                Sub-links selector
-              </Text>
-              <Input
-                value={subSelector}
-                onChange={(e) => setSubSelector(e.target.value)}
-                mb={3}
-                bg="white"
-                borderRadius="8px"
-                _focusVisible={{
-                  borderColor: "teal.500",
-                  boxShadow: "0 0 0 1px var(--chakra-colors-teal-500)",
-                }}
-              />
-
-              <Text fontSize="xs" color="gray.600" mb={1}>
-                Limit optional
-              </Text>
-              <Input
-                value={limit}
-                onChange={(e) => setLimit(e.target.value)}
-                placeholder="e.g. 10"
-                bg="white"
-                borderRadius="8px"
-                _focusVisible={{
-                  borderColor: "teal.500",
-                  boxShadow: "0 0 0 1px var(--chakra-colors-teal-500)",
-                }}
-              />
-            </Box>
-          )}
-
           <Button
             bg="#246b5a"
             color="white"
@@ -780,10 +697,8 @@ export default function App() {
                 <Spinner size="sm" />
                 <Text>Checking...</Text>
               </HStack>
-            ) : mode === "direct" ? (
-              "Check Source"
             ) : (
-              "Check Menu Source"
+              "Check Source"
             )}
           </Button>
 
@@ -845,19 +760,11 @@ export default function App() {
           <Box>
             <HStack justify="space-between" align="center" mb={2}>
               <Text fontSize="sm" fontWeight="semibold">
-                Source status
+                Sources
               </Text>
               <Badge bg="gray.100" color="gray.700" borderRadius="6px">
-                {sourceEntries.length}
+                {filteredSourceEntries.length}
               </Badge>
-            </HStack>
-
-            <HStack gap={2} wrap="wrap" mb={{ base: 2, md: 3 }}>
-              {renderStatusFilter("All", "all", sourceEntries.length)}
-              {renderStatusFilter("Active", "active", sourceStats.active, getStatusMeta("active"))}
-              {renderStatusFilter("Inactive", "inactive", sourceStats.inactive, getStatusMeta("inactive"))}
-              {renderStatusFilter("Checking", "checking", sourceStats.checking, getStatusMeta("checking"))}
-              {renderStatusFilter("Untested", "unknown", sourceStats.unknown, getStatusMeta("unknown"))}
             </HStack>
 
             {sourceEntries.length === 0 ? (
@@ -900,20 +807,20 @@ export default function App() {
                       borderColor={isSelected ? "teal.300" : statusMeta.border}
                       borderRadius="8px"
                       bg={isSelected ? "teal.50" : "white"}
-                      p={3}
+                      p={2}
                       _hover={{ borderColor: "teal.300", bg: isSelected ? "teal.50" : "gray.50" }}
                     >
-                      <HStack justify="space-between" align="start" gap={3}>
-                        <Box as="span" boxSize="8px" borderRadius="full" bg={statusMeta.dot} flex="0 0 auto" mt={1} />
+                      <HStack justify="space-between" align="center" gap={2}>
+                        <Box as="span" boxSize="8px" borderRadius="full" bg={statusMeta.dot} flex="0 0 auto" />
                         <Badge bg={statusMeta.bg} color={statusMeta.color} borderRadius="6px">
                           {statusMeta.label}
                         </Badge>
                       </HStack>
 
                       <Text
-                        fontSize="sm"
+                        fontSize="xs"
                         mt={1}
-                        lineClamp={2}
+                        lineClamp={1}
                         cursor={canPlay ? "pointer" : "default"}
                         fontFamily="mono"
                         color="gray.800"
@@ -925,18 +832,18 @@ export default function App() {
                       </Text>
 
                       {entry.error && (
-                        <Text mt={1} fontSize="xs" color="red.600" lineClamp={2}>
+                        <Text mt={1} fontSize="xs" color="red.600" lineClamp={1}>
                           {entry.error}
                         </Text>
                       )}
 
                       {entry.streams && entry.streams.length > 0 && (
-                        <Text mt={1} fontSize="xs" color="gray.500">
+                        <Text mt={0.5} fontSize="xs" color="gray.500">
                           {entry.streams.length} stream{entry.streams.length === 1 ? "" : "s"} resolved
                         </Text>
                       )}
 
-                      <HStack mt={2} wrap="wrap">
+                      <HStack mt={1.5} wrap="wrap" gap={1}>
                         <Button
                           size="xs"
                           bg="teal.600"
@@ -953,7 +860,7 @@ export default function App() {
                           variant="outline"
                           borderRadius="6px"
                           disabled={entry.status === "checking"}
-                          onClick={() => void checkAndStoreSource(entry.sourceUrl, "direct")}
+                          onClick={() => void checkAndStoreSource(entry.sourceUrl)}
                         >
                           Retest
                         </Button>
