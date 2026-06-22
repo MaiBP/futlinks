@@ -66,7 +66,108 @@ function extractPlaylistLinksFromText(text) {
     return text.match(re) || [];
 }
 
+function getProxyUrl(req, targetUrl) {
+    const baseUrl = `${req.protocol}://${req.get("host")}`;
+    return `${baseUrl}/hls-proxy?url=${encodeURIComponent(targetUrl)}`;
+}
+
+function getProxyHeaders(targetUrl) {
+    const url = new URL(targetUrl);
+
+    return {
+        "user-agent":
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123 Safari/537.36",
+        "accept": "*/*",
+        "origin": url.origin,
+        "referer": `${url.origin}/`,
+    };
+}
+
+function rewritePlaylist(content, baseUrl, req) {
+    return content
+        .split("\n")
+        .map((line) => {
+            const trimmed = line.trim();
+
+            if (!trimmed) return line;
+
+            if (trimmed.startsWith("#EXT-X-KEY") || trimmed.startsWith("#EXT-X-MAP")) {
+                return line.replace(/URI="([^"]+)"/g, (_, uri) => {
+                    const absoluteUrl = new URL(uri, baseUrl).toString();
+                    return `URI="${getProxyUrl(req, absoluteUrl)}"`;
+                });
+            }
+
+            if (trimmed.startsWith("#")) return line;
+
+            const absoluteUrl = new URL(trimmed, baseUrl).toString();
+            return getProxyUrl(req, absoluteUrl);
+        })
+        .join("\n");
+}
+
 app.get("/health", (_, res) => res.json({ ok: true }));
+
+app.get("/hls-proxy", async (req, res) => {
+    const target = req.query.url;
+
+    if (!target || typeof target !== "string") {
+        return res.status(400).json({ error: "Missing url" });
+    }
+
+    let targetUrl;
+
+    try {
+        targetUrl = new URL(target);
+    } catch {
+        return res.status(400).json({ error: "Invalid url" });
+    }
+
+    if (!["http:", "https:"].includes(targetUrl.protocol)) {
+        return res.status(400).json({ error: "Unsupported protocol" });
+    }
+
+    try {
+        const upstream = await fetch(targetUrl.toString(), {
+            headers: getProxyHeaders(targetUrl.toString()),
+            redirect: "follow",
+        });
+
+        res.status(upstream.status);
+
+        const contentType = upstream.headers.get("content-type") || "";
+        const isPlaylist =
+            contentType.toLowerCase().includes("mpegurl") ||
+            targetUrl.pathname.toLowerCase().includes(".m3u");
+
+        res.setHeader("Cache-Control", "no-store");
+        res.setHeader("Access-Control-Allow-Origin", "*");
+
+        if (!upstream.ok) {
+            const body = await upstream.text().catch(() => "");
+            return res.send(body || upstream.statusText);
+        }
+
+        if (isPlaylist) {
+            const playlist = await upstream.text();
+            res.setHeader("Content-Type", "application/vnd.apple.mpegurl");
+            return res.send(rewritePlaylist(playlist, targetUrl.toString(), req));
+        }
+
+        const body = Buffer.from(await upstream.arrayBuffer());
+        res.setHeader("Content-Type", contentType || "application/octet-stream");
+
+        const contentLength = upstream.headers.get("content-length");
+        if (contentLength) res.setHeader("Content-Length", contentLength);
+
+        return res.send(body);
+    } catch (err) {
+        return res.status(502).json({
+            error: "Proxy request failed",
+            details: String(err?.message || err),
+        });
+    }
+});
 
 async function runWithBrowser(fn) {
     const browser = await chromium.launch({ headless: true });

@@ -35,6 +35,7 @@ type SourceEntry = {
   sourceUrl: string;
   status: LinkStatus;
   streamUrl?: string;
+  originalStreamUrl?: string;
   streams?: string[];
   error?: string;
   title?: string;
@@ -72,6 +73,21 @@ function normalizeSourceUrls(urls: string[]) {
 function normalizePlaylistUrls(urls: string[]) {
   const normalized = urls.map(cleanUrl).filter(isPlaylistUrl);
   return Array.from(new Set(normalized));
+}
+
+function getProxiedStreamUrl(url: string) {
+  if (url.includes("/hls-proxy?url=")) return url;
+  return `${API_URL}/hls-proxy?url=${encodeURIComponent(url)}`;
+}
+
+function getOriginalStreamUrl(url: string) {
+  try {
+    const parsed = new URL(url);
+    const proxiedUrl = parsed.searchParams.get("url");
+    return proxiedUrl || url;
+  } catch {
+    return url;
+  }
 }
 
 function parseBulkSources(text: string) {
@@ -114,17 +130,22 @@ function readStoredSourceEntries(value: string | null) {
         ? normalizePlaylistUrls(item.streams.filter((stream): stream is string => typeof stream === "string"))
         : [];
 
-      const [streamUrl] = normalizePlaylistUrls([
-        typeof item.streamUrl === "string" ? item.streamUrl : streams[0] ?? "",
+      const [originalStreamUrl] = normalizePlaylistUrls([
+        typeof item.originalStreamUrl === "string" ? item.originalStreamUrl : "",
       ]);
-      const resolvedStreamUrl = streamUrl || (isPlaylistUrl(sourceUrl) ? sourceUrl : undefined);
-      const resolvedStreams = streams.length > 0 ? streams : resolvedStreamUrl ? [resolvedStreamUrl] : [];
+      const [streamUrl] = normalizePlaylistUrls([
+        typeof item.streamUrl === "string" ? getOriginalStreamUrl(item.streamUrl) : streams[0] ?? "",
+      ]);
+      const resolvedOriginalStreamUrl = originalStreamUrl || streamUrl || (isPlaylistUrl(sourceUrl) ? sourceUrl : undefined);
+      const resolvedStreamUrl = resolvedOriginalStreamUrl ? getProxiedStreamUrl(resolvedOriginalStreamUrl) : undefined;
+      const resolvedStreams = streams.length > 0 ? streams : resolvedOriginalStreamUrl ? [resolvedOriginalStreamUrl] : [];
 
       return [
         {
           sourceUrl,
           status: coerceStatus(item.status),
           streamUrl: resolvedStreamUrl,
+          originalStreamUrl: resolvedOriginalStreamUrl,
           streams: resolvedStreams,
           error: typeof item.error === "string" ? item.error : undefined,
           title: typeof item.title === "string" ? item.title : undefined,
@@ -264,6 +285,7 @@ export default function App() {
           ...entry,
           streams: entry.streams ?? existing?.streams,
           streamUrl: entry.streamUrl ?? existing?.streamUrl,
+          originalStreamUrl: entry.originalStreamUrl ?? existing?.originalStreamUrl,
         });
       }
 
@@ -314,7 +336,8 @@ export default function App() {
       return {
         sourceUrl,
         status: "active",
-        streamUrl: sourceUrl,
+        streamUrl: getProxiedStreamUrl(sourceUrl),
+        originalStreamUrl: sourceUrl,
         streams: [sourceUrl],
         lastCheckedAt: checkedAt,
       };
@@ -338,7 +361,8 @@ export default function App() {
     return {
       sourceUrl,
       status: streamUrl ? "active" : "inactive",
-      streamUrl,
+      streamUrl: streamUrl ? getProxiedStreamUrl(streamUrl) : undefined,
+      originalStreamUrl: streamUrl,
       streams,
       error: streamUrl ? undefined : "No playlist stream was found",
       title: typeof res.data?.title === "string" ? res.data.title : undefined,
