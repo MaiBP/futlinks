@@ -3,6 +3,7 @@ import cors from "cors";
 import { chromium } from "playwright";
 
 const app = express();
+app.set("trust proxy", true);
 
 const allowedOrigins = (process.env.ALLOWED_ORIGINS || "")
     .split(",")
@@ -67,7 +68,9 @@ function extractPlaylistLinksFromText(text) {
 }
 
 function getProxyUrl(req, targetUrl) {
-    const baseUrl = `${req.protocol}://${req.get("host")}`;
+    const forwardedProto = String(req.headers["x-forwarded-proto"] || "").split(",")[0].trim();
+    const protocol = forwardedProto || req.protocol || "https";
+    const baseUrl = `${protocol}://${req.get("host")}`;
     return `${baseUrl}/hls-proxy?url=${encodeURIComponent(targetUrl)}`;
 }
 
