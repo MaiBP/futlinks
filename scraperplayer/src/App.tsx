@@ -20,7 +20,6 @@ const LEGACY_SOURCE_HISTORY_KEY = "m3u8_source_history";
 const SOURCE_HISTORY_KEY = "scraperplayer_source_history";
 const PLAYLIST_LINKS_KEY = "scraperplayer_playlist_links";
 const SOURCE_ENTRIES_KEY = "scraperplayer_source_entries";
-const CAST_SENDER_SDK_URL = "https://www.gstatic.com/cv/js/sender/v1/cast_sender.js?loadCastFramework=1";
 
 type Notice = {
   type: "success" | "error" | "info";
@@ -319,8 +318,6 @@ export default function App() {
   const [playerRevision, setPlayerRevision] = useState(0);
   const [statusFilter, setStatusFilter] = useState<LinkStatus | "all">("all");
   const [sidebarOpen, setSidebarOpen] = useState(true);
-  const [castAvailable, setCastAvailable] = useState(false);
-  const [castLoading, setCastLoading] = useState(false);
   const [notice, setNotice] = useState<Notice | null>(null);
 
   useEffect(() => {
@@ -348,43 +345,6 @@ export default function App() {
       setSourceEntries(migratedSources);
       localStorage.setItem(SOURCE_ENTRIES_KEY, JSON.stringify(migratedSources));
     }
-  }, []);
-
-  useEffect(() => {
-    let mounted = true;
-
-    function initializeCast() {
-      if (!window.cast?.framework || !window.chrome?.cast?.media) return;
-
-      window.cast.framework.CastContext.getInstance().setOptions({
-        receiverApplicationId: window.chrome.cast.media.DEFAULT_MEDIA_RECEIVER_APP_ID,
-        autoJoinPolicy: window.chrome.cast.AutoJoinPolicy.ORIGIN_SCOPED,
-      });
-
-      if (mounted) setCastAvailable(true);
-    }
-
-    window.__onGCastApiAvailable = (isAvailable) => {
-      if (isAvailable) initializeCast();
-    };
-
-    if (window.cast?.framework && window.chrome?.cast?.media) {
-      initializeCast();
-      return () => {
-        mounted = false;
-      };
-    }
-
-    if (!document.querySelector(`script[src="${CAST_SENDER_SDK_URL}"]`)) {
-      const script = document.createElement("script");
-      script.src = CAST_SENDER_SDK_URL;
-      script.async = true;
-      document.head.appendChild(script);
-    }
-
-    return () => {
-      mounted = false;
-    };
   }, []);
 
   function updateSourceEntries(updater: (prev: SourceEntry[]) => SourceEntry[]) {
@@ -681,65 +641,13 @@ export default function App() {
     }
   }
 
-  async function castCurrentPlayback() {
-    if (!selected || !selectedSourceUrl) {
-      setNotice({
-        type: "error",
-        title: "Nothing to cast",
-        message: "Start a source before sending it to Chromecast.",
-      });
-      setTimeout(() => setNotice(null), 3500);
-      return;
-    }
-
-    if (!window.cast?.framework || !window.chrome?.cast?.media) {
-      setNotice({
-        type: "error",
-        title: "Cast unavailable",
-        message: "Open the app in Chrome on a device that can discover your Chromecast.",
-      });
-      setTimeout(() => setNotice(null), 4500);
-      return;
-    }
-
-    try {
-      setCastLoading(true);
-      setNotice({
-        type: "info",
-        title: "Opening Chromecast...",
-        message: "Choose the TV where you want to play this source.",
-      });
-
-      const castContext = window.cast.framework.CastContext.getInstance();
-      const session = castContext.getCurrentSession() || (await castContext.requestSession());
-      const mediaInfo = new window.chrome.cast.media.MediaInfo(selected, "application/x-mpegURL");
-      mediaInfo.metadata = new window.chrome.cast.media.GenericMediaMetadata();
-      mediaInfo.metadata.title = selectedSourceLabel;
-      mediaInfo.streamType = window.chrome.cast.media.StreamType.LIVE;
-
-      const request = new window.chrome.cast.media.LoadRequest(mediaInfo);
-      request.autoplay = true;
-
-      await session.loadMedia(request);
-
-      setNotice({
-        type: "success",
-        title: "Casting",
-        message: "Playback was sent to the selected TV.",
-      });
-      setTimeout(() => setNotice(null), 4500);
-    } catch (error) {
-      if (error instanceof DOMException && error.name === "AbortError") return;
-
-      setNotice({
-        type: "error",
-        title: "Cast failed",
-        message: getErrorMessage(error),
-      });
-      setTimeout(() => setNotice(null), 4500);
-    } finally {
-      setCastLoading(false);
-    }
+  function showCastPageHelp() {
+    setNotice({
+      type: "info",
+      title: "Cast the full page",
+      message: "Use Chrome or Android system Cast, then choose Cast tab or Cast screen. Websites cannot start full-page mirroring directly.",
+    });
+    setTimeout(() => setNotice(null), 8000);
   }
 
   const selectedStatus = useMemo(
@@ -1209,10 +1117,9 @@ export default function App() {
                 color="white"
                 borderRadius="8px"
                 _hover={{ bg: "#1b5547" }}
-                disabled={!selected || !selectedSourceUrl || castLoading || !castAvailable}
-                onClick={() => void castCurrentPlayback()}
+                onClick={showCastPageHelp}
               >
-                {castLoading ? "Casting..." : "Cast"}
+                Cast Page
               </Button>
               <Button
                 size="sm"
