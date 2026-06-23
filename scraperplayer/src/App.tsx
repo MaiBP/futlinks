@@ -88,6 +88,26 @@ function getOriginalStreamUrl(url: string) {
   }
 }
 
+function getSharedUrlParam(name: string) {
+  if (typeof window === "undefined") return "";
+
+  try {
+    return new URLSearchParams(window.location.search).get(name) || "";
+  } catch {
+    return "";
+  }
+}
+
+function getInitialSharedSourceUrl() {
+  const [sourceUrl] = normalizeSourceUrls([getSharedUrlParam("source")]);
+  return sourceUrl || "";
+}
+
+function getInitialSharedStreamUrl() {
+  const [streamUrl] = normalizePlaylistUrls([getSharedUrlParam("stream")]);
+  return streamUrl ? getProxiedStreamUrl(streamUrl) : undefined;
+}
+
 function parseBulkSources(text: string) {
   const matches = text.match(/https?:\/\/[^\s"'<>()]+/gi) ?? [];
   return normalizeSourceUrls(matches);
@@ -283,15 +303,18 @@ function getErrorMessage(error: unknown) {
 }
 
 export default function App() {
-  const [sourceUrl, setSourceUrl] = useState("");
+  const [sourceUrl, setSourceUrl] = useState(() => getInitialSharedSourceUrl());
 
   const [sourceFileName, setSourceFileName] = useState("");
   const [sourceFilePassword, setSourceFilePassword] = useState("");
   const [sourceEntries, setSourceEntries] = useState<SourceEntry[]>([]);
   const [bulkChecking, setBulkChecking] = useState(false);
   const [loading, setLoading] = useState(false);
-  const [selected, setSelected] = useState<string | undefined>(undefined);
-  const [selectedSourceUrl, setSelectedSourceUrl] = useState<string | undefined>(undefined);
+  const [selected, setSelected] = useState<string | undefined>(() => getInitialSharedStreamUrl());
+  const [selectedSourceUrl, setSelectedSourceUrl] = useState<string | undefined>(() => {
+    const sharedSource = getInitialSharedSourceUrl();
+    return sharedSource || undefined;
+  });
   const [playerRevision, setPlayerRevision] = useState(0);
   const [statusFilter, setStatusFilter] = useState<LinkStatus | "all">("all");
   const [sidebarOpen, setSidebarOpen] = useState(true);
@@ -549,6 +572,73 @@ export default function App() {
       return entry.streamUrl;
     });
     setSelectedSourceUrl(entry.sourceUrl);
+  }
+
+  function getCurrentPlaybackShareUrl() {
+    if (!selectedSourceUrl || !selected) return null;
+
+    const currentEntry = sourceEntries.find((entry) => entry.sourceUrl === selectedSourceUrl);
+    const originalStreamUrl = currentEntry?.originalStreamUrl || getOriginalStreamUrl(selected);
+    const shareUrl = new URL(window.location.href);
+    shareUrl.search = "";
+    shareUrl.hash = "";
+    shareUrl.searchParams.set("source", selectedSourceUrl);
+    shareUrl.searchParams.set("stream", originalStreamUrl);
+    return shareUrl.toString();
+  }
+
+  async function shareCurrentPlayback() {
+    const shareUrl = getCurrentPlaybackShareUrl();
+
+    if (!shareUrl) {
+      setNotice({
+        type: "error",
+        title: "Nothing to share",
+        message: "Start a source before sharing it to another device.",
+      });
+      setTimeout(() => setNotice(null), 3500);
+      return;
+    }
+
+    try {
+      const canUseNativeShare = "share" in navigator && typeof navigator.share === "function";
+
+      if (canUseNativeShare) {
+        await navigator.share({
+          title: "ScraperPlayer",
+          text: selectedSourceLabel,
+          url: shareUrl,
+        });
+      } else {
+        await navigator.clipboard.writeText(shareUrl);
+      }
+
+      setNotice({
+        type: "success",
+        title: canUseNativeShare ? "Share ready" : "TV link copied",
+        message: "Open this link on the other device to play the current source.",
+      });
+      setTimeout(() => setNotice(null), 4500);
+    } catch (error) {
+      if (error instanceof DOMException && error.name === "AbortError") return;
+
+      try {
+        await navigator.clipboard.writeText(shareUrl);
+        setNotice({
+          type: "success",
+          title: "TV link copied",
+          message: "Open this link on the other device to play the current source.",
+        });
+      } catch {
+        setNotice({
+          type: "error",
+          title: "Share failed",
+          message: getErrorMessage(error),
+        });
+      }
+
+      setTimeout(() => setNotice(null), 4500);
+    }
   }
 
   const selectedStatus = useMemo(
@@ -1011,15 +1101,26 @@ export default function App() {
                 {selectedSourceLabel}
               </Heading>
             </Box>
-            <Badge
-              bg={selected ? selectedStatusMeta.bg : "gray.100"}
-              color={selected ? selectedStatusMeta.color : "gray.600"}
-              borderWidth="1px"
-              borderColor={selected ? selectedStatusMeta.border : "gray.200"}
-              borderRadius="6px"
-            >
-              {selected ? selectedStatusMeta.label : "Idle"}
-            </Badge>
+            <HStack gap={2}>
+              <Button
+                size="sm"
+                variant="outline"
+                borderRadius="8px"
+                disabled={!selected || !selectedSourceUrl}
+                onClick={() => void shareCurrentPlayback()}
+              >
+                Share TV
+              </Button>
+              <Badge
+                bg={selected ? selectedStatusMeta.bg : "gray.100"}
+                color={selected ? selectedStatusMeta.color : "gray.600"}
+                borderWidth="1px"
+                borderColor={selected ? selectedStatusMeta.border : "gray.200"}
+                borderRadius="6px"
+              >
+                {selected ? selectedStatusMeta.label : "Idle"}
+              </Badge>
+            </HStack>
           </HStack>
 
           <Box
