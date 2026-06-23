@@ -302,6 +302,27 @@ function getErrorMessage(error: unknown) {
   return "Unknown error";
 }
 
+function CastIcon() {
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      width="18"
+      height="18"
+      fill="none"
+      stroke="currentColor"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      strokeWidth="2"
+      aria-hidden="true"
+    >
+      <path d="M3 5h18v14h-5" />
+      <path d="M3 17a2 2 0 0 1 2 2" />
+      <path d="M3 13a6 6 0 0 1 6 6" />
+      <path d="M3 9a10 10 0 0 1 10 10" />
+    </svg>
+  );
+}
+
 export default function App() {
   const [sourceUrl, setSourceUrl] = useState(() => getInitialSharedSourceUrl());
 
@@ -318,6 +339,7 @@ export default function App() {
   const [playerRevision, setPlayerRevision] = useState(0);
   const [statusFilter, setStatusFilter] = useState<LinkStatus | "all">("all");
   const [sidebarOpen, setSidebarOpen] = useState(true);
+  const [castPageActive, setCastPageActive] = useState(false);
   const [notice, setNotice] = useState<Notice | null>(null);
 
   useEffect(() => {
@@ -574,78 +596,22 @@ export default function App() {
     setSelectedSourceUrl(entry.sourceUrl);
   }
 
-  function getCurrentPlaybackShareUrl() {
-    if (!selectedSourceUrl || !selected) return null;
-
-    const currentEntry = sourceEntries.find((entry) => entry.sourceUrl === selectedSourceUrl);
-    const originalStreamUrl = currentEntry?.originalStreamUrl || getOriginalStreamUrl(selected);
-    const shareUrl = new URL(window.location.href);
-    shareUrl.search = "";
-    shareUrl.hash = "";
-    shareUrl.searchParams.set("source", selectedSourceUrl);
-    shareUrl.searchParams.set("stream", originalStreamUrl);
-    return shareUrl.toString();
-  }
-
-  async function shareCurrentPlayback() {
-    const shareUrl = getCurrentPlaybackShareUrl();
-
-    if (!shareUrl) {
-      setNotice({
-        type: "error",
-        title: "Nothing to share",
-        message: "Start a source before sharing it to another device.",
-      });
-      setTimeout(() => setNotice(null), 3500);
-      return;
-    }
-
-    try {
-      const canUseNativeShare = "share" in navigator && typeof navigator.share === "function";
-
-      if (canUseNativeShare) {
-        await navigator.share({
-          title: "ScraperPlayer",
-          text: selectedSourceLabel,
-          url: shareUrl,
-        });
-      } else {
-        await navigator.clipboard.writeText(shareUrl);
-      }
-
-      setNotice({
-        type: "success",
-        title: canUseNativeShare ? "Share ready" : "TV link copied",
-        message: "Open this link on the other device to play the current source.",
-      });
-      setTimeout(() => setNotice(null), 4500);
-    } catch (error) {
-      if (error instanceof DOMException && error.name === "AbortError") return;
-
-      try {
-        await navigator.clipboard.writeText(shareUrl);
-        setNotice({
-          type: "success",
-          title: "TV link copied",
-          message: "Open this link on the other device to play the current source.",
-        });
-      } catch {
-        setNotice({
-          type: "error",
-          title: "Share failed",
-          message: getErrorMessage(error),
-        });
-      }
-
-      setTimeout(() => setNotice(null), 4500);
-    }
-  }
-
   function showCastPageHelp() {
+    setCastPageActive(true);
     setNotice({
       type: "info",
       title: "Cast the full page",
-      message: "Use Chrome or Android system Cast, then choose Cast tab or Cast screen. Websites cannot start full-page mirroring directly.",
+      message: "Use Android or Chrome Cast controls, then choose Cast tab or Cast screen.",
+    });
+    setTimeout(() => setNotice(null), 8000);
+  }
+
+  function showEndCastHelp() {
+    setCastPageActive(false);
+    setNotice({
+      type: "info",
+      title: "End Cast",
+      message: "Stop mirroring from Android or Chrome Cast controls. Websites cannot end full-screen mirroring directly.",
     });
     setTimeout(() => setNotice(null), 8000);
   }
@@ -1110,26 +1076,26 @@ export default function App() {
                 {selectedSourceLabel}
               </Heading>
             </Box>
-            <HStack gap={2}>
+            <HStack gap={2} wrap="wrap" justify="end">
               <Button
                 size="sm"
                 bg="#246b5a"
                 color="white"
                 borderRadius="8px"
+                minW="38px"
+                px={2.5}
                 _hover={{ bg: "#1b5547" }}
                 onClick={showCastPageHelp}
+                aria-label="Cast page"
+                title="Cast page"
               >
-                Cast Page
+                <CastIcon />
               </Button>
-              <Button
-                size="sm"
-                variant="outline"
-                borderRadius="8px"
-                disabled={!selected || !selectedSourceUrl}
-                onClick={() => void shareCurrentPlayback()}
-              >
-                Share TV
-              </Button>
+              {castPageActive && (
+                <Button size="sm" variant="outline" borderRadius="8px" onClick={showEndCastHelp}>
+                  End Cast
+                </Button>
+              )}
               <Badge
                 bg={selected ? selectedStatusMeta.bg : "gray.100"}
                 color={selected ? selectedStatusMeta.color : "gray.600"}
