@@ -20,6 +20,7 @@ const LEGACY_SOURCE_HISTORY_KEY = "m3u8_source_history";
 const SOURCE_HISTORY_KEY = "scraperplayer_source_history";
 const PLAYLIST_LINKS_KEY = "scraperplayer_playlist_links";
 const SOURCE_ENTRIES_KEY = "scraperplayer_source_entries";
+const CAST_SENDER_SDK_URL = "https://www.gstatic.com/cv/js/sender/v1/cast_sender.js?loadCastFramework=1";
 
 type Notice = {
   type: "success" | "error" | "info";
@@ -339,7 +340,9 @@ export default function App() {
   const [playerRevision, setPlayerRevision] = useState(0);
   const [statusFilter, setStatusFilter] = useState<LinkStatus | "all">("all");
   const [sidebarOpen, setSidebarOpen] = useState(true);
-  const [castPageActive, setCastPageActive] = useState(false);
+  const [castAvailable, setCastAvailable] = useState(false);
+  const [castActive, setCastActive] = useState(false);
+  const [castLoading, setCastLoading] = useState(false);
   const [notice, setNotice] = useState<Notice | null>(null);
 
   useEffect(() => {
@@ -367,6 +370,58 @@ export default function App() {
       setSourceEntries(migratedSources);
       localStorage.setItem(SOURCE_ENTRIES_KEY, JSON.stringify(migratedSources));
     }
+  }, []);
+
+  useEffect(() => {
+    let mounted = true;
+
+    function updateCastSessionState() {
+      if (!window.cast?.framework) return;
+      const castContext = window.cast.framework.CastContext.getInstance();
+      const session = castContext.getCurrentSession();
+      if (mounted) setCastActive(Boolean(session));
+    }
+
+    function initializeCast() {
+      if (!window.cast?.framework || !window.chrome?.cast?.media) return;
+
+      const castContext = window.cast.framework.CastContext.getInstance();
+      castContext.setOptions({
+        receiverApplicationId: window.chrome.cast.media.DEFAULT_MEDIA_RECEIVER_APP_ID,
+        autoJoinPolicy: window.chrome.cast.AutoJoinPolicy.ORIGIN_SCOPED,
+      });
+      castContext.addEventListener(
+        window.cast.framework.CastContextEventType.SESSION_STATE_CHANGED,
+        updateCastSessionState
+      );
+
+      if (mounted) {
+        setCastAvailable(true);
+        updateCastSessionState();
+      }
+    }
+
+    window.__onGCastApiAvailable = (isAvailable) => {
+      if (isAvailable) initializeCast();
+    };
+
+    if (window.cast?.framework && window.chrome?.cast?.media) {
+      initializeCast();
+      return () => {
+        mounted = false;
+      };
+    }
+
+    if (!document.querySelector(`script[src="${CAST_SENDER_SDK_URL}"]`)) {
+      const script = document.createElement("script");
+      script.src = CAST_SENDER_SDK_URL;
+      script.async = true;
+      document.head.appendChild(script);
+    }
+
+    return () => {
+      mounted = false;
+    };
   }, []);
 
   function updateSourceEntries(updater: (prev: SourceEntry[]) => SourceEntry[]) {
@@ -596,24 +651,90 @@ export default function App() {
     setSelectedSourceUrl(entry.sourceUrl);
   }
 
-  function showCastPageHelp() {
-    setCastPageActive(true);
-    setNotice({
-      type: "info",
-      title: "Cast the full page",
-      message: "Use Android or Chrome Cast controls, then choose Cast tab or Cast screen.",
-    });
-    setTimeout(() => setNotice(null), 8000);
-  }
+  async function toggleCastPlayback() {
+    if (!window.cast?.framework || !window.chrome?.cast?.media) {
+      setNotice({
+        type: "error",
+        title: "Cast unavailable",
+        message: "Open the app in Chrome on the same Wi-Fi network as your TV.",
+      });
+      setTimeout(() => setNotice(null), 4500);
+      return;
+    }
 
-  function showEndCastHelp() {
-    setCastPageActive(false);
-    setNotice({
-      type: "info",
-      title: "End Cast",
-      message: "Stop mirroring from Android or Chrome Cast controls. Websites cannot end full-screen mirroring directly.",
-    });
-    setTimeout(() => setNotice(null), 8000);
+    const castContext = window.cast.framework.CastContext.getInstance();
+    const currentSession = castContext.getCurrentSession();
+
+    if (castActive || currentSession) {
+      try {
+        setCastLoading(true);
+        currentSession?.endSession(true);
+        setCastActive(false);
+        setNotice({
+          type: "success",
+          title: "Cast stopped",
+          message: "Playback was disconnected from the TV.",
+        });
+      } catch (error) {
+        setNotice({
+          type: "error",
+          title: "Cast stop failed",
+          message: getErrorMessage(error),
+        });
+      } finally {
+        setCastLoading(false);
+        setTimeout(() => setNotice(null), 4500);
+      }
+      return;
+    }
+
+    if (!selected || !selectedSourceUrl) {
+      setNotice({
+        type: "error",
+        title: "Nothing to cast",
+        message: "Start a source before sending it to your TV.",
+      });
+      setTimeout(() => setNotice(null), 3500);
+      return;
+    }
+
+    try {
+      setCastLoading(true);
+      setNotice({
+        type: "info",
+        title: "Opening Cast...",
+        message: "Choose your Android TV or Chromecast device.",
+      });
+
+      const session = currentSession || (await castContext.requestSession());
+      const mediaInfo = new window.chrome.cast.media.MediaInfo(selected, "application/x-mpegURL");
+      mediaInfo.metadata = new window.chrome.cast.media.GenericMediaMetadata();
+      mediaInfo.metadata.title = selectedSourceLabel;
+      mediaInfo.streamType = window.chrome.cast.media.StreamType.LIVE;
+
+      const request = new window.chrome.cast.media.LoadRequest(mediaInfo);
+      request.autoplay = true;
+
+      await session.loadMedia(request);
+      setCastActive(true);
+      setNotice({
+        type: "success",
+        title: "Casting",
+        message: "Playback was sent to the TV.",
+      });
+      setTimeout(() => setNotice(null), 4500);
+    } catch (error) {
+      if (error instanceof DOMException && error.name === "AbortError") return;
+
+      setNotice({
+        type: "error",
+        title: "Cast failed",
+        message: getErrorMessage(error),
+      });
+      setTimeout(() => setNotice(null), 4500);
+    } finally {
+      setCastLoading(false);
+    }
   }
 
   const selectedStatus = useMemo(
@@ -1079,23 +1200,19 @@ export default function App() {
             <HStack gap={2} wrap="wrap" justify="end">
               <Button
                 size="sm"
-                bg="#246b5a"
+                bg={castActive ? "red.600" : "#246b5a"}
                 color="white"
                 borderRadius="8px"
                 minW="38px"
                 px={2.5}
-                _hover={{ bg: "#1b5547" }}
-                onClick={showCastPageHelp}
-                aria-label="Cast page"
-                title="Cast page"
+                _hover={{ bg: castActive ? "red.700" : "#1b5547" }}
+                disabled={castLoading || !castAvailable}
+                onClick={() => void toggleCastPlayback()}
+                aria-label={castActive ? "Stop cast" : "Cast video"}
+                title={castActive ? "Stop cast" : "Cast video"}
               >
                 <CastIcon />
               </Button>
-              {castPageActive && (
-                <Button size="sm" variant="outline" borderRadius="8px" onClick={showEndCastHelp}>
-                  End Cast
-                </Button>
-              )}
               <Badge
                 bg={selected ? selectedStatusMeta.bg : "gray.100"}
                 color={selected ? selectedStatusMeta.color : "gray.600"}
