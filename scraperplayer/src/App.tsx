@@ -289,7 +289,6 @@ export default function App() {
   const [sourceFilePassword, setSourceFilePassword] = useState("");
   const [sourceEntries, setSourceEntries] = useState<SourceEntry[]>([]);
   const [bulkChecking, setBulkChecking] = useState(false);
-  const [bulkProgress, setBulkProgress] = useState({ done: 0, total: 0 });
   const [loading, setLoading] = useState(false);
   const [selected, setSelected] = useState<string | undefined>(undefined);
   const [selectedSourceUrl, setSelectedSourceUrl] = useState<string | undefined>(undefined);
@@ -456,32 +455,19 @@ export default function App() {
       return;
     }
 
-    setBulkChecking(true);
-    setBulkProgress({ done: 0, total: imported.length });
     upsertSourceEntries(
       imported.map((source) => ({
         sourceUrl: source,
-        status: "checking",
-        lastCheckedAt: new Date().toISOString(),
+        status: "unknown",
+        error: undefined,
       }))
     );
 
-    const results: SourceEntry[] = [];
-    for (const source of imported) {
-      const checked = await checkAndStoreSource(source);
-      if (checked) results.push(checked);
-      setBulkProgress((current) => ({ ...current, done: current.done + 1 }));
-    }
-
-    const active = results.filter((entry) => entry.status === "active").length;
-    const inactive = results.filter((entry) => entry.status === "inactive").length;
-
-    setBulkChecking(false);
     setSourceFileName(fileName);
     setNotice({
       type: "success",
-      title: "Sources checked",
-      message: `${fileName}: ${active} active, ${inactive} inactive`,
+      title: "Sources loaded",
+      message: `${fileName}: ${imported.length} sources ready to check on play`,
     });
     setTimeout(() => setNotice(null), 4500);
   }
@@ -504,9 +490,11 @@ export default function App() {
     }
 
     try {
+      setBulkChecking(true);
       setSourceFileName(file.name);
       const text = await file.text();
       await checkImportedSources(text, file.name);
+      setBulkChecking(false);
     } catch (error) {
       setBulkChecking(false);
       setNotice({
@@ -518,8 +506,43 @@ export default function App() {
     }
   }
 
-  function handleSourcePlay(entry: SourceEntry) {
-    if (entry.status !== "active" || !entry.streamUrl) return;
+  async function handleSourcePlay(entry: SourceEntry) {
+    if (entry.status === "checking") return;
+
+    if (entry.status !== "active" || !entry.streamUrl) {
+      setSelected(undefined);
+      setSelectedSourceUrl(entry.sourceUrl);
+      setNotice({
+        type: "info",
+        title: "Checking link...",
+        message: "Resolving this source before playback",
+      });
+
+      const checked = await checkAndStoreSource(entry.sourceUrl);
+
+      if (!checked || checked.status !== "active" || !checked.streamUrl) {
+        setNotice({
+          type: "error",
+          title: "Source inactive",
+          message: checked?.error || "No playable stream was found",
+        });
+        setTimeout(() => setNotice(null), 4500);
+        return;
+      }
+
+      setNotice({
+        type: "success",
+        title: "Source active",
+        message: "Starting playback",
+      });
+      setTimeout(() => setNotice(null), 2500);
+      setSelected((current) => {
+        if (current === checked.streamUrl) setPlayerRevision((revision) => revision + 1);
+        return checked.streamUrl;
+      });
+      setSelectedSourceUrl(checked.sourceUrl);
+      return;
+    }
 
     setSelected((current) => {
       if (current === entry.streamUrl) setPlayerRevision((revision) => revision + 1);
@@ -834,7 +857,7 @@ export default function App() {
               {bulkChecking && <Spinner size="xs" />}
               <Text fontSize="xs" color="gray.500">
                 {bulkChecking
-                  ? `Checking ${bulkProgress.done}/${bulkProgress.total}`
+                  ? "Importing sources..."
                   : sourceFileName || "Select an encrypted JSON source file"}
               </Text>
             </HStack>
@@ -860,7 +883,7 @@ export default function App() {
                 p={3}
               >
                 <Text fontSize="sm" color="gray.500">
-                  No sources checked yet.
+                  No sources loaded yet.
                 </Text>
               </Box>
             ) : filteredSourceEntries.length === 0 ? (
@@ -881,7 +904,7 @@ export default function App() {
                 {filteredSourceEntries.map((entry, idx) => {
                   const statusMeta = getStatusMeta(entry.status);
                   const isSelected = selectedSourceUrl === entry.sourceUrl;
-                  const canPlay = entry.status === "active" && Boolean(entry.streamUrl);
+                  const canPlay = entry.status !== "checking";
 
                   return (
                     <Box
@@ -908,7 +931,7 @@ export default function App() {
                         fontFamily="mono"
                         color="gray.800"
                         onClick={() => {
-                          if (canPlay) handleSourcePlay(entry);
+                          if (canPlay) void handleSourcePlay(entry);
                         }}
                       >
                         {getSourceCardLabel(entry.sourceUrl)}
@@ -934,9 +957,9 @@ export default function App() {
                           borderRadius="6px"
                           _hover={{ bg: "teal.700" }}
                           disabled={!canPlay}
-                          onClick={() => handleSourcePlay(entry)}
+                          onClick={() => void handleSourcePlay(entry)}
                         >
-                          Play
+                          {entry.status === "checking" ? "Checking" : "Play"}
                         </Button>
                         <Button
                           size="xs"
