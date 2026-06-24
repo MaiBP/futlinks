@@ -1,18 +1,12 @@
 import { type ChangeEvent, useEffect, useMemo, useState } from "react";
 import axios from "axios";
-import {
-  AspectRatio,
-  Badge,
-  Box,
-  Button,
-  Flex,
-  Heading,
-  HStack,
-  Input,
-  Spinner,
-  Text,
-  VStack,
-} from "@chakra-ui/react";
+import { Cast, ChevronLeft, FileInput, ListChecks, Loader2, Moon, PanelLeftOpen, Search, Star, Sun } from "lucide-react";
+import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Input } from "@/components/ui/input";
+import { Sidebar, SidebarContent, SidebarHeader, SidebarInset } from "@/components/ui/sidebar";
+import { cn } from "@/lib/utils";
 import VideoPlayer from "./components/VideoPlayer";
 
 const API_URL = import.meta.env.VITE_API_URL || "http://localhost:5179";
@@ -20,6 +14,8 @@ const LEGACY_SOURCE_HISTORY_KEY = "m3u8_source_history";
 const SOURCE_HISTORY_KEY = "scraperplayer_source_history";
 const PLAYLIST_LINKS_KEY = "scraperplayer_playlist_links";
 const SOURCE_ENTRIES_KEY = "scraperplayer_source_entries";
+const FAVORITE_SOURCES_KEY = "scraperplayer_favorite_sources";
+const THEME_KEY = "scraperplayer_theme";
 const CAST_SENDER_SDK_URL = "https://www.gstatic.com/cv/js/sender/v1/cast_sender.js?loadCastFramework=1";
 
 type Notice = {
@@ -29,6 +25,9 @@ type Notice = {
 };
 
 type LinkStatus = "unknown" | "checking" | "active" | "inactive";
+type SidebarMode = "input" | "results";
+type ResultFilter = LinkStatus | "all" | "favorites";
+type ThemeMode = "light" | "dark";
 
 type SourceEntry = {
   sourceUrl: string;
@@ -45,9 +44,8 @@ type SourceEntry = {
 type StatusMeta = {
   label: string;
   dot: string;
-  bg: string;
-  color: string;
-  border: string;
+  badge: string;
+  active: string;
 };
 
 function cleanUrl(url: string) {
@@ -109,22 +107,26 @@ function getInitialSharedStreamUrl() {
   return streamUrl ? getProxiedStreamUrl(streamUrl) : undefined;
 }
 
+function getInitialTheme(): ThemeMode {
+  if (typeof window === "undefined") return "light";
+  const stored = localStorage.getItem(THEME_KEY);
+  if (stored === "dark" || stored === "light") return stored;
+  return window.matchMedia?.("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+}
+
 function parseBulkSources(text: string) {
   const matches = text.match(/https?:\/\/[^\s"'<>()]+/gi) ?? [];
   return normalizeSourceUrls(matches);
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
+}
+
 function extractSourceUrlsFromJson(value: unknown): string[] {
   if (typeof value === "string") return parseBulkSources(value);
-
-  if (Array.isArray(value)) {
-    return normalizeSourceUrls(value.flatMap((item) => extractSourceUrlsFromJson(item)));
-  }
-
-  if (isRecord(value)) {
-    return normalizeSourceUrls(Object.values(value).flatMap((item) => extractSourceUrlsFromJson(item)));
-  }
-
+  if (Array.isArray(value)) return normalizeSourceUrls(value.flatMap((item) => extractSourceUrlsFromJson(item)));
+  if (isRecord(value)) return normalizeSourceUrls(Object.values(value).flatMap((item) => extractSourceUrlsFromJson(item)));
   return [];
 }
 
@@ -150,10 +152,7 @@ async function decryptSourcesJson(encrypted: Record<string, unknown>, passphrase
   const ciphertext = base64ToBytes(String(encrypted.ciphertext));
   const iterations = typeof encrypted.iterations === "number" ? encrypted.iterations : 250000;
   const encodedPassphrase = new TextEncoder().encode(passphrase);
-
-  const passwordKey = await window.crypto.subtle.importKey("raw", encodedPassphrase, "PBKDF2", false, [
-    "deriveKey",
-  ]);
+  const passwordKey = await window.crypto.subtle.importKey("raw", encodedPassphrase, "PBKDF2", false, ["deriveKey"]);
   const aesKey = await window.crypto.subtle.deriveKey(
     { name: "PBKDF2", salt, iterations, hash: "SHA-256" },
     passwordKey,
@@ -162,27 +161,19 @@ async function decryptSourcesJson(encrypted: Record<string, unknown>, passphrase
     ["decrypt"]
   );
   const decrypted = await window.crypto.subtle.decrypt({ name: "AES-GCM", iv }, aesKey, ciphertext);
-  const text = new TextDecoder().decode(decrypted);
-  return JSON.parse(text) as unknown;
+  return JSON.parse(new TextDecoder().decode(decrypted)) as unknown;
 }
 
 async function readImportedSourceUrls(fileText: string, passphrase: string) {
   const parsed = JSON.parse(fileText) as unknown;
 
   if (looksEncryptedSourceFile(parsed)) {
-    if (!passphrase.trim()) {
-      throw new Error("Enter the file key before importing the encrypted JSON.");
-    }
-
+    if (!passphrase.trim()) throw new Error("Enter the file key before importing the encrypted JSON.");
     const decrypted = await decryptSourcesJson(parsed, passphrase.trim());
     return extractSourceUrlsFromJson(decrypted);
   }
 
   return extractSourceUrlsFromJson(parsed);
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null;
 }
 
 function coerceStatus(value: unknown): LinkStatus {
@@ -205,7 +196,6 @@ function readStoredSourceEntries(value: string | null) {
       }
 
       if (!isRecord(item)) return [];
-
       const rawSourceUrl = typeof item.sourceUrl === "string" ? item.sourceUrl : item.url;
       if (typeof rawSourceUrl !== "string") return [];
 
@@ -215,7 +205,6 @@ function readStoredSourceEntries(value: string | null) {
       const streams = Array.isArray(item.streams)
         ? normalizePlaylistUrls(item.streams.filter((stream): stream is string => typeof stream === "string"))
         : [];
-
       const [originalStreamUrl] = normalizePlaylistUrls([
         typeof item.originalStreamUrl === "string" ? item.originalStreamUrl : "",
       ]);
@@ -249,20 +238,29 @@ function readStoredSourceEntries(value: string | null) {
   }
 }
 
+function readFavoriteSources(value: string | null) {
+  if (!value) return [];
+
+  try {
+    const parsed: unknown = JSON.parse(value);
+    if (!Array.isArray(parsed)) return [];
+    return normalizeSourceUrls(parsed.filter((item): item is string => typeof item === "string"));
+  } catch {
+    return [];
+  }
+}
+
 function getStatusMeta(status: LinkStatus): StatusMeta {
   if (status === "active") {
-    return { label: "Active", dot: "green.500", bg: "green.50", color: "green.700", border: "green.200" };
+    return { label: "Active", dot: "bg-green-500", badge: "border-green-200 bg-green-50 text-green-700 dark:border-green-900 dark:bg-green-950 dark:text-green-300", active: "bg-green-600 text-white border-green-600" };
   }
-
   if (status === "inactive") {
-    return { label: "Inactive", dot: "red.500", bg: "red.50", color: "red.700", border: "red.200" };
+    return { label: "Inactive", dot: "bg-red-500", badge: "border-red-200 bg-red-50 text-red-700 dark:border-red-900 dark:bg-red-950 dark:text-red-300", active: "bg-red-600 text-white border-red-600" };
   }
-
   if (status === "checking") {
-    return { label: "Checking", dot: "yellow.400", bg: "yellow.50", color: "yellow.800", border: "yellow.200" };
+    return { label: "Checking", dot: "bg-yellow-400", badge: "border-yellow-200 bg-yellow-50 text-yellow-800 dark:border-yellow-900 dark:bg-yellow-950 dark:text-yellow-300", active: "bg-yellow-500 text-gray-950 border-yellow-500" };
   }
-
-  return { label: "Untested", dot: "gray.400", bg: "gray.50", color: "gray.600", border: "gray.200" };
+  return { label: "Untested", dot: "bg-gray-400", badge: "border-gray-200 bg-gray-50 text-gray-600 dark:border-gray-800 dark:bg-gray-900 dark:text-gray-300", active: "bg-gray-700 text-white border-gray-700" };
 }
 
 function getHostnameLabel(url: string) {
@@ -279,13 +277,7 @@ function getSourceCardLabel(url: string) {
 
   try {
     const decoded = decodeURIComponent(valueAfterEquals);
-    const compact = decoded
-      .split(/[&#]/)[0]
-      .split("/")
-      .filter(Boolean)
-      .at(-1)
-      ?.trim();
-
+    const compact = decoded.split(/[&#]/)[0].split("/").filter(Boolean).at(-1)?.trim();
     return compact || getHostnameLabel(url);
   } catch {
     return valueAfterEquals.trim() || getHostnameLabel(url);
@@ -298,38 +290,36 @@ function getErrorMessage(error: unknown) {
     if (typeof data?.details === "string" && data.details.trim()) return data.details;
     if (error.message) return error.message;
   }
-
   if (error instanceof Error && error.message) return error.message;
   return "Unknown error";
 }
 
-function CastIcon() {
+function SidebarSection({
+  title,
+  action,
+  children,
+}: {
+  title: string;
+  action?: React.ReactNode;
+  children: React.ReactNode;
+}) {
   return (
-    <svg
-      viewBox="0 0 24 24"
-      width="18"
-      height="18"
-      fill="none"
-      stroke="currentColor"
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      strokeWidth="2"
-      aria-hidden="true"
-    >
-      <path d="M3 5h18v14h-5" />
-      <path d="M3 17a2 2 0 0 1 2 2" />
-      <path d="M3 13a6 6 0 0 1 6 6" />
-      <path d="M3 9a10 10 0 0 1 10 10" />
-    </svg>
+    <Card>
+      <CardHeader>
+        <CardTitle>{title}</CardTitle>
+        {action}
+      </CardHeader>
+      <CardContent>{children}</CardContent>
+    </Card>
   );
 }
 
 export default function App() {
   const [sourceUrl, setSourceUrl] = useState(() => getInitialSharedSourceUrl());
-
-  const [sourceFileName, setSourceFileName] = useState("");
   const [sourceFilePassword, setSourceFilePassword] = useState("");
   const [sourceEntries, setSourceEntries] = useState<SourceEntry[]>([]);
+  const [favoriteSources, setFavoriteSources] = useState<string[]>([]);
+  const [sourceSearch, setSourceSearch] = useState("");
   const [bulkChecking, setBulkChecking] = useState(false);
   const [loading, setLoading] = useState(false);
   const [selected, setSelected] = useState<string | undefined>(() => getInitialSharedStreamUrl());
@@ -338,23 +328,25 @@ export default function App() {
     return sharedSource || undefined;
   });
   const [playerRevision, setPlayerRevision] = useState(0);
-  const [statusFilter, setStatusFilter] = useState<LinkStatus | "all">("all");
+  const [statusFilter, setStatusFilter] = useState<ResultFilter>("all");
   const [sidebarOpen, setSidebarOpen] = useState(true);
+  const [sidebarMode, setSidebarMode] = useState<SidebarMode>("input");
   const [castAvailable, setCastAvailable] = useState(false);
   const [castActive, setCastActive] = useState(false);
   const [castLoading, setCastLoading] = useState(false);
+  const [theme, setTheme] = useState<ThemeMode>(() => getInitialTheme());
   const [notice, setNotice] = useState<Notice | null>(null);
 
   useEffect(() => {
-    const savedSources = readStoredSourceEntries(localStorage.getItem(SOURCE_ENTRIES_KEY));
+    setFavoriteSources(readFavoriteSources(localStorage.getItem(FAVORITE_SOURCES_KEY)));
 
+    const savedSources = readStoredSourceEntries(localStorage.getItem(SOURCE_ENTRIES_KEY));
     if (savedSources.length > 0) {
       setSourceEntries(savedSources);
       return;
     }
 
     const legacyPlaylistLinks = readStoredSourceEntries(localStorage.getItem(PLAYLIST_LINKS_KEY));
-
     if (legacyPlaylistLinks.length > 0) {
       setSourceEntries(legacyPlaylistLinks);
       localStorage.setItem(SOURCE_ENTRIES_KEY, JSON.stringify(legacyPlaylistLinks));
@@ -363,14 +355,17 @@ export default function App() {
 
     const saved = localStorage.getItem(SOURCE_HISTORY_KEY);
     const legacySaved = localStorage.getItem(LEGACY_SOURCE_HISTORY_KEY);
-    const history = saved || legacySaved;
-    const migratedSources = readStoredSourceEntries(history);
-
+    const migratedSources = readStoredSourceEntries(saved || legacySaved);
     if (migratedSources.length > 0) {
       setSourceEntries(migratedSources);
       localStorage.setItem(SOURCE_ENTRIES_KEY, JSON.stringify(migratedSources));
     }
   }, []);
+
+  useEffect(() => {
+    localStorage.setItem(THEME_KEY, theme);
+    document.documentElement.classList.toggle("dark", theme === "dark");
+  }, [theme]);
 
   useEffect(() => {
     let mounted = true;
@@ -384,17 +379,12 @@ export default function App() {
 
     function initializeCast() {
       if (!window.cast?.framework || !window.chrome?.cast?.media) return;
-
       const castContext = window.cast.framework.CastContext.getInstance();
       castContext.setOptions({
         receiverApplicationId: window.chrome.cast.media.DEFAULT_MEDIA_RECEIVER_APP_ID,
         autoJoinPolicy: window.chrome.cast.AutoJoinPolicy.ORIGIN_SCOPED,
       });
-      castContext.addEventListener(
-        window.cast.framework.CastContextEventType.SESSION_STATE_CHANGED,
-        updateCastSessionState
-      );
-
+      castContext.addEventListener(window.cast.framework.CastContextEventType.SESSION_STATE_CHANGED, updateCastSessionState);
       if (mounted) {
         setCastAvailable(true);
         updateCastSessionState();
@@ -434,10 +424,8 @@ export default function App() {
 
   function upsertSourceEntries(entries: SourceEntry[]) {
     if (entries.length === 0) return;
-
     updateSourceEntries((prev) => {
       const byUrl = new Map(prev.map((entry) => [entry.sourceUrl, entry]));
-
       for (const entry of entries) {
         const existing = byUrl.get(entry.sourceUrl);
         byUrl.set(entry.sourceUrl, {
@@ -448,7 +436,6 @@ export default function App() {
           originalStreamUrl: entry.originalStreamUrl ?? existing?.originalStreamUrl,
         });
       }
-
       return Array.from(byUrl.values());
     });
   }
@@ -456,24 +443,25 @@ export default function App() {
   function markSourceStatus(sourceUrl: string, status: LinkStatus, updates: Partial<SourceEntry> = {}) {
     const [normalized] = normalizeSourceUrls([sourceUrl]);
     if (!normalized) return;
-
     updateSourceEntries((prev) => {
       const checkedAt = new Date().toISOString();
       const exists = prev.some((entry) => entry.sourceUrl === normalized);
       const next = prev.map((entry) =>
-        entry.sourceUrl === normalized
-          ? { ...entry, ...updates, sourceUrl: normalized, status, lastCheckedAt: checkedAt }
-          : entry
+        entry.sourceUrl === normalized ? { ...entry, ...updates, sourceUrl: normalized, status, lastCheckedAt: checkedAt } : entry
       );
-
       if (!exists) next.unshift({ sourceUrl: normalized, ...updates, status, lastCheckedAt: checkedAt });
       return next;
     });
   }
 
-  function removeSourceEntry(sourceUrl: string) {
-    updateSourceEntries((prev) => prev.filter((item) => item.sourceUrl !== sourceUrl));
-    if (selectedSourceUrl === sourceUrl) {
+  function removeSourceEntry(sourceUrlToRemove: string) {
+    updateSourceEntries((prev) => prev.filter((item) => item.sourceUrl !== sourceUrlToRemove));
+    setFavoriteSources((prev) => {
+      const next = prev.filter((item) => item !== sourceUrlToRemove);
+      localStorage.setItem(FAVORITE_SOURCES_KEY, JSON.stringify(next));
+      return next;
+    });
+    if (selectedSourceUrl === sourceUrlToRemove) {
       setSelected(undefined);
       setSelectedSourceUrl(undefined);
     }
@@ -481,34 +469,45 @@ export default function App() {
 
   function clearSourceEntries() {
     setSourceEntries([]);
+    setFavoriteSources([]);
     localStorage.removeItem(SOURCE_ENTRIES_KEY);
+    localStorage.removeItem(FAVORITE_SOURCES_KEY);
     setSelected(undefined);
     setSelectedSourceUrl(undefined);
   }
 
-  async function checkSourceUrl(source: string): Promise<SourceEntry> {
-    const [sourceUrl] = normalizeSourceUrls([source]);
-    if (!sourceUrl) throw new Error("Invalid source URL");
+  function toggleFavoriteSource(sourceUrlToToggle: string) {
+    setFavoriteSources((prev) => {
+      const next = prev.includes(sourceUrlToToggle)
+        ? prev.filter((item) => item !== sourceUrlToToggle)
+        : [...prev, sourceUrlToToggle];
+      localStorage.setItem(FAVORITE_SOURCES_KEY, JSON.stringify(next));
+      return next;
+    });
+  }
 
+  async function checkSourceUrl(source: string): Promise<SourceEntry> {
+    const [normalizedSourceUrl] = normalizeSourceUrls([source]);
+    if (!normalizedSourceUrl) throw new Error("Invalid source URL");
     const checkedAt = new Date().toISOString();
 
-    if (isPlaylistUrl(sourceUrl)) {
+    if (isPlaylistUrl(normalizedSourceUrl)) {
       return {
-        sourceUrl,
+        sourceUrl: normalizedSourceUrl,
         status: "active",
-        streamUrl: getProxiedStreamUrl(sourceUrl),
-        originalStreamUrl: sourceUrl,
-        streams: [sourceUrl],
+        streamUrl: getProxiedStreamUrl(normalizedSourceUrl),
+        originalStreamUrl: normalizedSourceUrl,
+        streams: [normalizedSourceUrl],
         lastCheckedAt: checkedAt,
       };
     }
 
-    const res = await axios.post(`${API_URL}/scrape-direct`, { url: sourceUrl });
+    const res = await axios.post(`${API_URL}/scrape-direct`, { url: normalizedSourceUrl });
     const streams = normalizePlaylistUrls(res.data?.results || []);
     const streamUrl = streams[0];
 
     return {
-      sourceUrl,
+      sourceUrl: normalizedSourceUrl,
       status: streamUrl ? "active" : "inactive",
       streamUrl: streamUrl ? getProxiedStreamUrl(streamUrl) : undefined,
       originalStreamUrl: streamUrl,
@@ -521,18 +520,17 @@ export default function App() {
   }
 
   async function checkAndStoreSource(source: string) {
-    const [sourceUrl] = normalizeSourceUrls([source]);
-    if (!sourceUrl) return null;
-
-    markSourceStatus(sourceUrl, "checking", { error: undefined });
+    const [normalizedSourceUrl] = normalizeSourceUrls([source]);
+    if (!normalizedSourceUrl) return null;
+    markSourceStatus(normalizedSourceUrl, "checking", { error: undefined });
 
     try {
-      const checked = await checkSourceUrl(sourceUrl);
+      const checked = await checkSourceUrl(normalizedSourceUrl);
       upsertSourceEntries([checked]);
       return checked;
     } catch (error) {
       const failed: SourceEntry = {
-        sourceUrl,
+        sourceUrl: normalizedSourceUrl,
         status: "inactive",
         error: getErrorMessage(error),
         lastCheckedAt: new Date().toISOString(),
@@ -544,64 +542,37 @@ export default function App() {
 
   async function checkImportedSources(fileText: string, fileName: string) {
     const imported = await readImportedSourceUrls(fileText, sourceFilePassword);
-
     if (imported.length === 0) {
-      setNotice({
-        type: "error",
-        title: "No source URLs found",
-        message: "The selected JSON file does not contain valid source URLs.",
-      });
+      setNotice({ type: "error", title: "No source URLs found", message: "The selected JSON file does not contain valid source URLs." });
       setTimeout(() => setNotice(null), 4500);
       return;
     }
 
-    upsertSourceEntries(
-      imported.map((source) => ({
-        sourceUrl: source,
-        status: "unknown",
-        error: undefined,
-      }))
-    );
-
-    setSourceFileName(fileName);
-    setNotice({
-      type: "success",
-      title: "Sources loaded",
-      message: `${fileName}: ${imported.length} sources ready to check on play`,
-    });
+    upsertSourceEntries(imported.map((source) => ({ sourceUrl: source, status: "unknown", error: undefined })));
+    setSidebarMode("results");
+    setNotice({ type: "success", title: "Sources loaded", message: `${fileName}: ${imported.length} sources ready to check on play` });
     setTimeout(() => setNotice(null), 4500);
   }
 
   async function handleSourceFileChange(event: ChangeEvent<HTMLInputElement>) {
     const file = event.target.files?.[0];
     event.target.value = "";
-
     if (!file) return;
 
     const isJsonFile = file.name.toLowerCase().endsWith(".json") || file.type === "application/json" || file.type === "";
     if (!isJsonFile) {
-      setNotice({
-        type: "error",
-        title: "Invalid file",
-        message: "Select an encrypted .json file with source URLs.",
-      });
+      setNotice({ type: "error", title: "Invalid file", message: "Select an encrypted .json file with source URLs." });
       setTimeout(() => setNotice(null), 4500);
       return;
     }
 
     try {
       setBulkChecking(true);
-      setSourceFileName(file.name);
-      const text = await file.text();
-      await checkImportedSources(text, file.name);
+      await checkImportedSources(await file.text(), file.name);
       setBulkChecking(false);
     } catch (error) {
       setBulkChecking(false);
-      setNotice({
-        type: "error",
-        title: "File read failed",
-        message: getErrorMessage(error),
-      });
+      setNotice({ type: "error", title: "File read failed", message: getErrorMessage(error) });
       setTimeout(() => setNotice(null), 4500);
     }
   }
@@ -612,29 +583,16 @@ export default function App() {
     if (entry.status !== "active" || !entry.streamUrl) {
       setSelected(undefined);
       setSelectedSourceUrl(entry.sourceUrl);
-      setNotice({
-        type: "info",
-        title: "Checking link...",
-        message: "Resolving this source before playback",
-      });
-
+      setNotice({ type: "info", title: "Checking link...", message: "Resolving this source before playback" });
       const checked = await checkAndStoreSource(entry.sourceUrl);
 
       if (!checked || checked.status !== "active" || !checked.streamUrl) {
-        setNotice({
-          type: "error",
-          title: "Source inactive",
-          message: checked?.error || "No playable stream was found",
-        });
+        setNotice({ type: "error", title: "Source inactive", message: checked?.error || "No playable stream was found" });
         setTimeout(() => setNotice(null), 4500);
         return;
       }
 
-      setNotice({
-        type: "success",
-        title: "Source active",
-        message: "Starting playback",
-      });
+      setNotice({ type: "success", title: "Source active", message: "Starting playback" });
       setTimeout(() => setNotice(null), 2500);
       setSelected((current) => {
         if (current === checked.streamUrl) setPlayerRevision((revision) => revision + 1);
@@ -651,13 +609,95 @@ export default function App() {
     setSelectedSourceUrl(entry.sourceUrl);
   }
 
+  const selectedStatus = useMemo(
+    () => sourceEntries.find((entry) => entry.sourceUrl === selectedSourceUrl)?.status ?? "unknown",
+    [sourceEntries, selectedSourceUrl]
+  );
+  const selectedStatusMeta = useMemo(() => getStatusMeta(selectedStatus), [selectedStatus]);
+  const sourceStats = useMemo(
+    () => ({
+      active: sourceEntries.filter((entry) => entry.status === "active").length,
+      inactive: sourceEntries.filter((entry) => entry.status === "inactive").length,
+      checking: sourceEntries.filter((entry) => entry.status === "checking").length,
+      unknown: sourceEntries.filter((entry) => entry.status === "unknown").length,
+    }),
+    [sourceEntries]
+  );
+  const filteredSourceEntries = useMemo(
+    () => {
+      const search = sourceSearch.trim().toLowerCase();
+      const filtered = sourceEntries.filter((entry) => {
+        const matchesStatus =
+          statusFilter === "all" ||
+          (statusFilter === "favorites" ? favoriteSources.includes(entry.sourceUrl) : entry.status === statusFilter);
+        if (!matchesStatus) return false;
+        if (!search) return true;
+
+        const searchable = [
+          getSourceCardLabel(entry.sourceUrl),
+          entry.sourceUrl,
+          entry.title,
+          entry.finalUrl,
+        ]
+          .filter(Boolean)
+          .join(" ")
+          .toLowerCase();
+
+        return searchable.includes(search);
+      });
+
+      return filtered.sort((a, b) => Number(favoriteSources.includes(b.sourceUrl)) - Number(favoriteSources.includes(a.sourceUrl)));
+    },
+    [favoriteSources, sourceEntries, sourceSearch, statusFilter]
+  );
+  const selectedSourceLabel = selectedSourceUrl ? getSourceCardLabel(selectedSourceUrl) : "No source selected";
+
+  const noticeClass = useMemo(() => {
+    if (!notice) return "";
+    if (notice.type === "success") return "border-green-200 bg-green-50 text-green-800 dark:border-green-900 dark:bg-green-950 dark:text-green-300";
+    if (notice.type === "error") return "border-red-200 bg-red-50 text-red-800 dark:border-red-900 dark:bg-red-950 dark:text-red-300";
+    return "border-blue-200 bg-blue-50 text-blue-800 dark:border-blue-900 dark:bg-blue-950 dark:text-blue-300";
+  }, [notice]);
+
+  function handlePlayerStatusChange(_streamUrl: string, status: "checking" | "active" | "inactive") {
+    if (!selectedSourceUrl) return;
+    markSourceStatus(selectedSourceUrl, status, {
+      error: status === "inactive" ? "Resolved stream failed to play" : undefined,
+    });
+  }
+
+  async function runScrape(customUrl?: string) {
+    const urlToUse = customUrl || sourceUrl;
+    if (!urlToUse) return;
+    setLoading(true);
+    setSelected(undefined);
+    setSelectedSourceUrl(undefined);
+
+    try {
+      setNotice({ type: "info", title: "Checking source...", message: "Scanning page network for .m3u / .m3u8 links..." });
+      const checked = await checkAndStoreSource(urlToUse);
+
+      if (checked?.status === "active" && checked.streamUrl) {
+        setSelected(checked.streamUrl);
+        setSelectedSourceUrl(checked.sourceUrl);
+      }
+
+      setNotice({
+        type: checked?.status === "active" ? "success" : "error",
+        title: checked?.status === "active" ? "Source active" : "Source inactive",
+        message: checked?.status === "active" ? "A playable stream was resolved and saved for this source" : checked?.error || "No playable stream was found",
+      });
+    } catch (err: unknown) {
+      setNotice({ type: "error", title: "Error", message: getErrorMessage(err) });
+    } finally {
+      setLoading(false);
+      setTimeout(() => setNotice(null), 4500);
+    }
+  }
+
   async function toggleCastPlayback() {
     if (!window.cast?.framework || !window.chrome?.cast?.media) {
-      setNotice({
-        type: "error",
-        title: "Cast unavailable",
-        message: "Open the app in Chrome on the same Wi-Fi network as your TV.",
-      });
+      setNotice({ type: "error", title: "Cast unavailable", message: "Open the app in Chrome on the same Wi-Fi network as your TV." });
       setTimeout(() => setNotice(null), 4500);
       return;
     }
@@ -670,17 +710,9 @@ export default function App() {
         setCastLoading(true);
         currentSession?.endSession(true);
         setCastActive(false);
-        setNotice({
-          type: "success",
-          title: "Cast stopped",
-          message: "Playback was disconnected from the TV.",
-        });
+        setNotice({ type: "success", title: "Cast stopped", message: "Playback was disconnected from the TV." });
       } catch (error) {
-        setNotice({
-          type: "error",
-          title: "Cast stop failed",
-          message: getErrorMessage(error),
-        });
+        setNotice({ type: "error", title: "Cast stop failed", message: getErrorMessage(error) });
       } finally {
         setCastLoading(false);
         setTimeout(() => setNotice(null), 4500);
@@ -689,577 +721,362 @@ export default function App() {
     }
 
     if (!selected || !selectedSourceUrl) {
-      setNotice({
-        type: "error",
-        title: "Nothing to cast",
-        message: "Start a source before sending it to your TV.",
-      });
+      setNotice({ type: "error", title: "Nothing to cast", message: "Start a source before sending it to your TV." });
       setTimeout(() => setNotice(null), 3500);
       return;
     }
 
     try {
       setCastLoading(true);
-      setNotice({
-        type: "info",
-        title: "Opening Cast...",
-        message: "Choose your Android TV or Chromecast device.",
-      });
-
+      setNotice({ type: "info", title: "Opening Cast...", message: "Choose your Android TV or Chromecast device." });
       const session = currentSession || (await castContext.requestSession());
       const mediaInfo = new window.chrome.cast.media.MediaInfo(selected, "application/x-mpegURL");
       mediaInfo.metadata = new window.chrome.cast.media.GenericMediaMetadata();
       mediaInfo.metadata.title = selectedSourceLabel;
       mediaInfo.streamType = window.chrome.cast.media.StreamType.LIVE;
-
       const request = new window.chrome.cast.media.LoadRequest(mediaInfo);
       request.autoplay = true;
-
       await session.loadMedia(request);
       setCastActive(true);
-      setNotice({
-        type: "success",
-        title: "Casting",
-        message: "Playback was sent to the TV.",
-      });
+      setNotice({ type: "success", title: "Casting", message: "Playback was sent to the TV." });
       setTimeout(() => setNotice(null), 4500);
     } catch (error) {
       if (error instanceof DOMException && error.name === "AbortError") return;
-
-      setNotice({
-        type: "error",
-        title: "Cast failed",
-        message: getErrorMessage(error),
-      });
+      setNotice({ type: "error", title: "Cast failed", message: getErrorMessage(error) });
       setTimeout(() => setNotice(null), 4500);
     } finally {
       setCastLoading(false);
     }
   }
 
-  const selectedStatus = useMemo(
-    () => sourceEntries.find((entry) => entry.sourceUrl === selectedSourceUrl)?.status ?? "unknown",
-    [sourceEntries, selectedSourceUrl]
-  );
-
-  const selectedStatusMeta = useMemo(() => getStatusMeta(selectedStatus), [selectedStatus]);
-
-  const sourceStats = useMemo(
-    () => ({
-      active: sourceEntries.filter((entry) => entry.status === "active").length,
-      inactive: sourceEntries.filter((entry) => entry.status === "inactive").length,
-      checking: sourceEntries.filter((entry) => entry.status === "checking").length,
-      unknown: sourceEntries.filter((entry) => entry.status === "unknown").length,
-    }),
-    [sourceEntries]
-  );
-
-  const filteredSourceEntries = useMemo(
-    () => sourceEntries.filter((entry) => statusFilter === "all" || entry.status === statusFilter),
-    [sourceEntries, statusFilter]
-  );
-
-  const selectedSourceLabel = selectedSourceUrl ? getSourceCardLabel(selectedSourceUrl) : "No source selected";
-
-  const noticeStyle = useMemo(() => {
-    if (!notice) return null;
-    if (notice.type === "success") return { bg: "green.50", border: "green.200", color: "green.800" };
-    if (notice.type === "error") return { bg: "red.50", border: "red.200", color: "red.800" };
-    return { bg: "blue.50", border: "blue.200", color: "blue.800" };
-  }, [notice]);
-
-  function handlePlayerStatusChange(_streamUrl: string, status: "checking" | "active" | "inactive") {
-    if (!selectedSourceUrl) return;
-
-    markSourceStatus(selectedSourceUrl, status, {
-      error: status === "inactive" ? "Resolved stream failed to play" : undefined,
-    });
-  }
-
-  async function runScrape(customUrl?: string) {
-    const urlToUse = customUrl || sourceUrl;
-
-    if (!urlToUse) return;
-
-    setLoading(true);
-    setSelected(undefined);
-    setSelectedSourceUrl(undefined);
-
-    try {
-      setNotice({
-        type: "info",
-        title: "Checking source...",
-        message: "Scanning page network for .m3u / .m3u8 links...",
-      });
-
-      const checked = await checkAndStoreSource(urlToUse);
-
-      if (checked?.status === "active" && checked.streamUrl) {
-        setSelected(checked.streamUrl);
-        setSelectedSourceUrl(checked.sourceUrl);
-      }
-
-      setNotice({
-        type: checked?.status === "active" ? "success" : "error",
-        title: checked?.status === "active" ? "Source active" : "Source inactive",
-        message:
-          checked?.status === "active"
-            ? "A playable stream was resolved and saved for this source"
-            : checked?.error || "No playable stream was found",
-      });
-    } catch (err: unknown) {
-      setNotice({
-        type: "error",
-        title: "Error",
-        message: getErrorMessage(err),
-      });
-    } finally {
-      setLoading(false);
-      setTimeout(() => setNotice(null), 4500);
-    }
-  }
-
-  function renderStatusFilter(label: string, value: LinkStatus | "all", count: number, meta?: StatusMeta) {
+  function renderStatusFilter(label: string, value: ResultFilter, count: number, meta?: StatusMeta) {
     const active = statusFilter === value;
-    const activeBg =
-      value === "active"
-        ? "green.600"
-        : value === "inactive"
-          ? "red.600"
-          : value === "checking"
-            ? "yellow.500"
-            : value === "unknown"
-              ? "gray.700"
-              : "teal.600";
-    const activeColor = value === "checking" ? "gray.900" : "white";
-
     return (
-      <Badge
-        as="button"
-        bg={active ? activeBg : meta?.bg ?? "gray.100"}
-        color={active ? activeColor : meta?.color ?? "gray.700"}
-        borderWidth="1px"
-        borderColor={active ? activeBg : meta?.border ?? "transparent"}
-        borderRadius="6px"
-        cursor="pointer"
-        px={2}
-        py={1}
+      <button
+        className={cn(
+          "rounded-md border px-1.5 py-0.5 text-[11px] font-semibold transition-colors",
+          active ? meta?.active ?? "border-[#246b5a] bg-[#246b5a] text-white" : meta?.badge ?? "border-transparent bg-gray-100 text-gray-700 dark:bg-gray-900 dark:text-gray-300"
+        )}
         onClick={() => setStatusFilter(value)}
+        type="button"
       >
         {label} {count}
-      </Badge>
+      </button>
+    );
+  }
+
+  function renderSidebarModeButton(label: string, value: SidebarMode, count?: number) {
+    const active = sidebarMode === value;
+    return (
+      <Button
+        className={cn(
+          "relative h-10 flex-1 border font-semibold shadow-none",
+          active
+            ? "border-[#246b5a] bg-[#246b5a] text-white shadow-sm hover:bg-[#1b5547]"
+            : "border-gray-200 bg-white text-gray-700 hover:border-teal-200 hover:bg-teal-50 hover:text-teal-800 dark:border-gray-700 dark:bg-gray-900 dark:text-gray-200 dark:hover:border-teal-900 dark:hover:bg-teal-950 dark:hover:text-teal-300"
+        )}
+        onClick={() => setSidebarMode(value)}
+        type="button"
+        variant="outline"
+      >
+        <span>{label}</span>
+        {typeof count === "number" && (
+          <Badge className={cn(active ? "border-white/30 bg-white/15 text-white" : "border-teal-200 bg-teal-50 text-teal-700 dark:border-teal-900 dark:bg-teal-950 dark:text-teal-300")}>
+            {count}
+          </Badge>
+        )}
+        {active && <span className="absolute inset-x-3 -bottom-1 h-1 rounded-full bg-[#246b5a]" />}
+      </Button>
     );
   }
 
   return (
-    <Flex
-      h="100dvh"
-      maxH="100dvh"
-      bg="#f4f6f5"
-      color="gray.900"
-      direction={{ base: "column", lg: "row" }}
-      overflow="hidden"
-    >
-      {/* Sidebar / Controls */}
-      <Box
-        w={sidebarOpen ? { base: "100%", lg: "400px" } : { base: "44px", lg: "48px" }}
-        maxW={sidebarOpen ? { base: "100%", lg: "400px" } : { base: "44px", lg: "48px" }}
-        bg="#ffffff"
-        borderRightWidth={{ base: "0", lg: "1px" }}
-        borderBottomWidth={{ base: "1px", lg: "0" }}
-        borderColor="gray.200"
-        p={sidebarOpen ? { base: 2, md: 5 } : { base: 1.5, md: 2 }}
-        h={{ base: sidebarOpen ? "50dvh" : "44px", lg: "100dvh" }}
-        maxH={{ base: sidebarOpen ? "50dvh" : "44px", lg: "100dvh" }}
-        overflowY={sidebarOpen ? "auto" : "hidden"}
-        transition="width 160ms ease, max-width 160ms ease"
-        flexShrink={0}
-      >
+    <div className={cn("flex h-dvh max-h-dvh flex-col overflow-hidden bg-[#f4f6f5] text-gray-900 dark:bg-[#0f1715] dark:text-gray-100 lg:flex-row", theme === "dark" && "dark")}>
+      <Sidebar open={sidebarOpen}>
         {!sidebarOpen ? (
-          <Button
-            size="sm"
-            variant="ghost"
-            minW="32px"
-            h={{ base: "30px", md: "32px" }}
-            borderRadius="8px"
-            onClick={() => setSidebarOpen(true)}
-          >
-            &gt;
-          </Button>
-        ) : (
-        <VStack align="stretch" gap={{ base: 3, md: 5 }}>
-          <Box>
-            <HStack justify="space-between" align="center" gap={3}>
-              <Heading size={{ base: "sm", md: "lg" }}>ScraperPlayer</Heading>
-              <HStack gap={2}>
-                <Badge
-                  bg="teal.50"
-                  color="teal.700"
-                  borderWidth="1px"
-                  borderColor="teal.200"
-                  borderRadius="6px"
-                >
-                  HLS
-                </Badge>
-                <Button
-                  size="xs"
-                  variant="outline"
-                  borderRadius="6px"
-                  minW="28px"
-                  onClick={() => setSidebarOpen(false)}
-                >
-                  &lt;
-                </Button>
-              </HStack>
-            </HStack>
-            <HStack mt={1} gap={2} wrap="wrap">
-              <Badge bg="gray.100" color="gray.700" borderRadius="6px">
-                API
-              </Badge>
-              <Text fontSize="xs" color="gray.500" wordBreak="break-all" lineClamp={1}>
-                {API_URL}
-              </Text>
-            </HStack>
-          </Box>
-
-          <Box>
-            <HStack justify="space-between" align="center" mb={2}>
-              <Text fontSize="sm" fontWeight="semibold">
-                Source status
-              </Text>
-              <Badge bg="gray.100" color="gray.700" borderRadius="6px">
-                {sourceEntries.length}
-              </Badge>
-            </HStack>
-            <HStack gap={2} wrap="wrap">
-              {renderStatusFilter("All", "all", sourceEntries.length)}
-              {renderStatusFilter("Active", "active", sourceStats.active, getStatusMeta("active"))}
-              {renderStatusFilter("Inactive", "inactive", sourceStats.inactive, getStatusMeta("inactive"))}
-              {renderStatusFilter("Checking", "checking", sourceStats.checking, getStatusMeta("checking"))}
-              {renderStatusFilter("Untested", "unknown", sourceStats.unknown, getStatusMeta("unknown"))}
-            </HStack>
-          </Box>
-
-          <Box>
-            <Text fontSize="xs" fontWeight="semibold" color="gray.600" mb={2}>
-              Source URL
-            </Text>
-            <Input
-              value={sourceUrl}
-              onChange={(e) => setSourceUrl(e.target.value)}
-              placeholder="Paste source URL or direct .m3u8/.m3u"
-              size={{ base: "sm", md: "md" }}
-              bg="gray.50"
-              borderColor="gray.200"
-              borderRadius="8px"
-              _focusVisible={{
-                borderColor: "teal.500",
-                boxShadow: "0 0 0 1px var(--chakra-colors-teal-500)",
-              }}
-            />
-          </Box>
-
-          <Button
-            bg="#246b5a"
-            color="white"
-            borderRadius="8px"
-            minH="42px"
-            _hover={{ bg: "#1b5547" }}
-            _disabled={{ opacity: 0.45, cursor: "not-allowed" }}
-            onClick={() => runScrape()}
-            disabled={!sourceUrl || loading}
-          >
-            {loading ? (
-              <HStack>
-                <Spinner size="sm" />
-                <Text>Checking...</Text>
-              </HStack>
-            ) : (
-              "Check Source"
-            )}
-          </Button>
-
-          {notice && noticeStyle && (
-            <Box
-              p={3}
-              borderWidth="1px"
-              borderColor={noticeStyle.border}
-              bg={noticeStyle.bg}
-              borderRadius="8px"
+          <div className="flex h-full items-center gap-2 lg:flex-col lg:items-center">
+            <Button
+              className="bg-gray-950 text-white hover:bg-gray-800 dark:bg-white dark:text-gray-950 dark:hover:bg-gray-200"
+              onClick={() => setSidebarOpen(true)}
+              size="icon"
+              title="Open sidebar"
+              type="button"
             >
-              <Text fontWeight="semibold" color={noticeStyle.color}>
-                {notice.title}
-              </Text>
-              {notice.message && (
-                <Text mt={1} fontSize="sm" color={noticeStyle.color}>
-                  {notice.message}
-                </Text>
+              <PanelLeftOpen className="h-4 w-4" />
+            </Button>
+            <Button
+              className={cn(
+                sidebarMode === "input" &&
+                  "bg-teal-50 text-teal-700 hover:bg-teal-100 dark:bg-[#246b5a] dark:text-white dark:hover:bg-[#1b5547]"
               )}
-            </Box>
-          )}
-
-          <Box h="1px" bg="gray.200" />
-
-          <Box>
-            <HStack justify="space-between" align="center" mb={2}>
-              <Text fontSize="sm" fontWeight="semibold">
-                Import sources
-              </Text>
-              <Badge bg="gray.100" color="gray.700" borderRadius="6px">
-                encrypted .json
-              </Badge>
-            </HStack>
-            <Input
-              value={sourceFilePassword}
-              onChange={(e) => setSourceFilePassword(e.target.value)}
-              type="password"
-              placeholder="File key"
-              size={{ base: "sm", md: "md" }}
-              mb={2}
-              bg="gray.50"
-              borderColor="gray.200"
-              borderRadius="8px"
-              _focusVisible={{
-                borderColor: "teal.500",
-                boxShadow: "0 0 0 1px var(--chakra-colors-teal-500)",
+              onClick={() => {
+                setSidebarMode("input");
+                setSidebarOpen(true);
               }}
-            />
-            <Input
-              type="file"
-              accept=".json,application/json"
-              disabled={bulkChecking}
-              onChange={handleSourceFileChange}
-              size={{ base: "sm", md: "md" }}
-              bg="gray.50"
-              borderColor="gray.200"
-              borderRadius="8px"
-              py={1}
-              _focusVisible={{
-                borderColor: "teal.500",
-                boxShadow: "0 0 0 1px var(--chakra-colors-teal-500)",
+              size="icon"
+              title="Input sources"
+              type="button"
+              variant="ghost"
+            >
+              <FileInput className="h-4 w-4" />
+            </Button>
+            <Button
+              className={cn(
+                "relative",
+                sidebarMode === "results" &&
+                  "bg-teal-50 text-teal-700 hover:bg-teal-100 dark:bg-[#246b5a] dark:text-white dark:hover:bg-[#1b5547]"
+              )}
+              onClick={() => {
+                setSidebarMode("results");
+                setSidebarOpen(true);
               }}
-            />
-            <HStack mt={2} gap={2} wrap="wrap">
-              {bulkChecking && <Spinner size="xs" />}
-              <Text fontSize="xs" color="gray.500">
-                {bulkChecking
-                  ? "Importing sources..."
-                  : sourceFileName || "Select an encrypted JSON source file"}
-              </Text>
-            </HStack>
-          </Box>
-
-          <Box>
-            <HStack justify="space-between" align="center" mb={2}>
-              <Text fontSize="sm" fontWeight="semibold">
-                Sources
-              </Text>
-              <Badge bg="gray.100" color="gray.700" borderRadius="6px">
-                {filteredSourceEntries.length}
-              </Badge>
-            </HStack>
-
-            {sourceEntries.length === 0 ? (
-              <Box
-                borderWidth="1px"
-                borderStyle="dashed"
-                borderColor="gray.200"
-                borderRadius="8px"
-                bg="gray.50"
-                p={3}
-              >
-                <Text fontSize="sm" color="gray.500">
-                  No sources loaded yet.
-                </Text>
-              </Box>
-            ) : filteredSourceEntries.length === 0 ? (
-              <Box
-                borderWidth="1px"
-                borderStyle="dashed"
-                borderColor="gray.200"
-                borderRadius="8px"
-                bg="gray.50"
-                p={3}
-              >
-                <Text fontSize="sm" color="gray.500">
-                  No sources match this status.
-                </Text>
-              </Box>
-            ) : (
-              <VStack align="stretch" gap={2} maxH={{ base: "32dvh", lg: "280px" }} overflowY="auto">
-                {filteredSourceEntries.map((entry, idx) => {
-                  const statusMeta = getStatusMeta(entry.status);
-                  const isSelected = selectedSourceUrl === entry.sourceUrl;
-                  const canPlay = entry.status !== "checking";
-
-                  return (
-                    <Box
-                      key={`${entry.sourceUrl}-${idx}`}
-                      borderWidth="1px"
-                      borderColor={isSelected ? "teal.300" : statusMeta.border}
-                      borderRadius="8px"
-                      bg={isSelected ? "teal.50" : "white"}
-                      p={2}
-                      _hover={{ borderColor: "teal.300", bg: isSelected ? "teal.50" : "gray.50" }}
+              size="icon"
+              title="Result sources"
+              type="button"
+              variant="ghost"
+            >
+              <ListChecks className="h-4 w-4" />
+              {sourceEntries.length > 0 && (
+                <span className="absolute right-1 top-1 h-1.5 w-1.5 rounded-full bg-[#246b5a]" />
+              )}
+            </Button>
+            <Button
+              className={cn(
+                "lg:mt-auto",
+                castActive && "bg-red-50 text-red-700 hover:bg-red-100 dark:bg-red-700 dark:text-white dark:hover:bg-red-800"
+              )}
+              disabled={castLoading || !castAvailable}
+              onClick={() => void toggleCastPlayback()}
+              size="icon"
+              title={castActive ? "Stop cast" : "Cast video"}
+              type="button"
+              variant="ghost"
+            >
+              <Cast className="h-4 w-4" />
+            </Button>
+          </div>
+        ) : (
+          <>
+          <SidebarHeader>
+            <Card>
+              <CardContent className="p-4">
+                <div className="flex items-center justify-between gap-3">
+                  <img
+                    alt="D10S"
+                    className="h-14 w-auto rounded-md object-contain"
+                    src="/d10sLogo.png"
+                  />
+                  <div className="flex items-center gap-2">
+                    <Button
+                      onClick={() => setTheme((current) => (current === "dark" ? "light" : "dark"))}
+                      size="xs"
+                      title={theme === "dark" ? "Light mode" : "Dark mode"}
+                      type="button"
+                      variant="outline"
                     >
-                      <HStack justify="space-between" align="center" gap={2}>
-                        <Box as="span" boxSize="8px" borderRadius="full" bg={statusMeta.dot} flex="0 0 auto" />
-                        <Badge bg={statusMeta.bg} color={statusMeta.color} borderRadius="6px">
-                          {statusMeta.label}
-                        </Badge>
-                      </HStack>
+                      {theme === "dark" ? <Sun className="h-4 w-4" /> : <Moon className="h-4 w-4" />}
+                    </Button>
+                    <Button onClick={() => setSidebarOpen(false)} size="xs" type="button" variant="outline">
+                      <ChevronLeft className="h-4 w-4" />
+                    </Button>
+                  </div>
+                </div>
+              </CardContent>
+            </Card>
 
-                      <Text
-                        fontSize="xs"
-                        mt={1}
-                        lineClamp={1}
-                        cursor={canPlay ? "pointer" : "default"}
-                        fontFamily="mono"
-                        color="gray.800"
-                        onClick={() => {
-                          if (canPlay) void handleSourcePlay(entry);
-                        }}
-                      >
-                        {getSourceCardLabel(entry.sourceUrl)}
-                      </Text>
+            <div className="flex gap-2 rounded-lg border border-gray-200 bg-white p-1.5 shadow-sm dark:border-gray-800 dark:bg-gray-950">
+              {renderSidebarModeButton("Input sources", "input")}
+              {renderSidebarModeButton("Result sources", "results", sourceEntries.length)}
+            </div>
+          </SidebarHeader>
 
-                      {entry.error && (
-                        <Text mt={1} fontSize="xs" color="red.600" lineClamp={1}>
-                          {entry.error}
-                        </Text>
-                      )}
-
-                      {entry.streams && entry.streams.length > 0 && (
-                        <Text mt={0.5} fontSize="xs" color="gray.500">
-                          {entry.streams.length} stream{entry.streams.length === 1 ? "" : "s"} resolved
-                        </Text>
-                      )}
-
-                      <HStack mt={1.5} wrap="wrap" gap={1}>
-                        <Button
-                          size="xs"
-                          bg="teal.600"
-                          color="white"
-                          borderRadius="6px"
-                          _hover={{ bg: "teal.700" }}
-                          disabled={!canPlay}
-                          onClick={() => void handleSourcePlay(entry)}
-                        >
-                          {entry.status === "checking" ? "Checking" : "Play"}
-                        </Button>
-                        <Button
-                          size="xs"
-                          variant="outline"
-                          borderRadius="6px"
-                          disabled={entry.status === "checking"}
-                          onClick={() => void checkAndStoreSource(entry.sourceUrl)}
-                        >
-                          Retest
-                        </Button>
-                        <Button
-                          size="xs"
-                          variant="outline"
-                          borderRadius="6px"
-                          onClick={() => removeSourceEntry(entry.sourceUrl)}
-                        >
-                          Remove
-                        </Button>
-                      </HStack>
-                    </Box>
-                  );
-                })}
-              </VStack>
+          <SidebarContent>
+            {notice && (
+              <div className={cn("rounded-lg border p-3", noticeClass)}>
+                <p className="font-semibold">{notice.title}</p>
+                {notice.message && <p className="mt-1 text-sm">{notice.message}</p>}
+              </div>
             )}
 
-            {sourceEntries.length > 0 && (
-              <Button size="sm" mt={3} variant="outline" borderRadius="8px" onClick={clearSourceEntries}>
-                Clear sources
-              </Button>
+            {sidebarMode === "input" ? (
+              <>
+                <SidebarSection title="Single source">
+                  <Input
+                    onChange={(event) => setSourceUrl(event.target.value)}
+                    placeholder="Paste source URL or direct .m3u8/.m3u"
+                    value={sourceUrl}
+                  />
+                  <Button className="mt-3 min-h-10 w-full" disabled={!sourceUrl || loading} onClick={() => runScrape()} type="button">
+                    {loading ? (
+                      <>
+                        <Loader2 className="h-4 w-4 animate-spin" />
+                        Checking...
+                      </>
+                    ) : (
+                      "Check Source"
+                    )}
+                  </Button>
+                </SidebarSection>
+
+                <SidebarSection title="Import sources">
+                  <Input
+                    className="mb-2"
+                    onChange={(event) => setSourceFilePassword(event.target.value)}
+                    placeholder="File key"
+                    type="password"
+                    value={sourceFilePassword}
+                  />
+                  <Input accept=".json,application/json" disabled={bulkChecking} onChange={handleSourceFileChange} type="file" />
+                  {bulkChecking && (
+                    <div className="mt-2 flex items-center gap-2 text-xs text-gray-500">
+                      <Loader2 className="h-3 w-3 animate-spin" />
+                      <span>Importing sources...</span>
+                    </div>
+                  )}
+                </SidebarSection>
+              </>
+            ) : (
+              <>
+                <SidebarSection title="Result sources" action={<Badge>{filteredSourceEntries.length}</Badge>}>
+                  <div className="relative mb-3">
+                    <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-gray-400" />
+                    <Input
+                      className="pl-9"
+                      onChange={(event) => setSourceSearch(event.target.value)}
+                      placeholder="Search sources..."
+                      value={sourceSearch}
+                    />
+                  </div>
+                  <div className="mb-3 flex flex-wrap gap-1.5">
+                    {renderStatusFilter("All", "all", sourceEntries.length)}
+                    {renderStatusFilter("Active", "active", sourceStats.active, getStatusMeta("active"))}
+                    {renderStatusFilter("Inactive", "inactive", sourceStats.inactive, getStatusMeta("inactive"))}
+                    {renderStatusFilter("Checking", "checking", sourceStats.checking, getStatusMeta("checking"))}
+                    {renderStatusFilter("Untested", "unknown", sourceStats.unknown, getStatusMeta("unknown"))}
+                    {renderStatusFilter("Favorites", "favorites", favoriteSources.length)}
+                  </div>
+                  {sourceEntries.length === 0 ? (
+                    <div className="rounded-lg border border-dashed border-gray-200 bg-gray-50 p-3 text-sm text-gray-500 dark:border-gray-800 dark:bg-gray-900 dark:text-gray-400">No sources loaded yet.</div>
+                  ) : filteredSourceEntries.length === 0 ? (
+                    <div className="rounded-lg border border-dashed border-gray-200 bg-gray-50 p-3 text-sm text-gray-500 dark:border-gray-800 dark:bg-gray-900 dark:text-gray-400">No sources match this status.</div>
+                  ) : (
+                    <div className="max-h-[calc(58dvh-170px)] space-y-2 overflow-y-auto lg:max-h-[calc(100dvh-250px)]">
+                      {filteredSourceEntries.map((entry, idx) => {
+                        const statusMeta = getStatusMeta(entry.status);
+                        const isSelected = selectedSourceUrl === entry.sourceUrl;
+                        const canPlay = entry.status !== "checking";
+                        const isFavorite = favoriteSources.includes(entry.sourceUrl);
+                        return (
+                          <div
+                            className={cn(
+                              "rounded-lg border bg-white p-2 transition-colors hover:border-teal-300 hover:bg-gray-50 dark:bg-gray-950 dark:hover:border-teal-700 dark:hover:bg-gray-900",
+                              isSelected ? "border-teal-300 bg-teal-50 dark:border-teal-700 dark:bg-teal-950" : statusMeta.badge
+                            )}
+                            key={`${entry.sourceUrl}-${idx}`}
+                          >
+                            <div className="flex items-center justify-between gap-2">
+                              <div className="flex min-w-0 items-center gap-2">
+                                <span className={cn("h-2 w-2 shrink-0 rounded-full", statusMeta.dot)} />
+                                <button
+                                  className={cn("min-w-0 truncate text-left font-mono text-xs text-gray-800 dark:text-gray-100", canPlay ? "cursor-pointer" : "cursor-default")}
+                                  onClick={() => {
+                                    if (canPlay) void handleSourcePlay(entry);
+                                  }}
+                                  type="button"
+                                >
+                                  {getSourceCardLabel(entry.sourceUrl)}
+                                </button>
+                                <button
+                                  className={cn(
+                                    "shrink-0 text-gray-300 transition-colors hover:text-yellow-500",
+                                    isFavorite && "text-yellow-500"
+                                  )}
+                                  onClick={() => toggleFavoriteSource(entry.sourceUrl)}
+                                  title={isFavorite ? "Remove from favorites" : "Add to favorites"}
+                                  type="button"
+                                >
+                                  <Star className={cn("h-3.5 w-3.5", isFavorite && "fill-current")} />
+                                </button>
+                              </div>
+                              <Badge className={statusMeta.badge}>{statusMeta.label}</Badge>
+                            </div>
+                            {entry.error && <p className="mt-1 truncate text-xs text-red-600 dark:text-red-400">{entry.error}</p>}
+                            {entry.streams && entry.streams.length > 0 && (
+                              <p className="mt-0.5 text-xs text-gray-500 dark:text-gray-400">
+                                {entry.streams.length} stream{entry.streams.length === 1 ? "" : "s"} resolved
+                              </p>
+                            )}
+                            <div className="mt-1.5 flex flex-wrap gap-1">
+                              <Button disabled={!canPlay} onClick={() => void handleSourcePlay(entry)} size="xs" type="button">
+                                {entry.status === "checking" ? "Checking" : "Play"}
+                              </Button>
+                              <Button disabled={entry.status === "checking"} onClick={() => void checkAndStoreSource(entry.sourceUrl)} size="xs" type="button" variant="outline">
+                                Retest
+                              </Button>
+                              <Button onClick={() => removeSourceEntry(entry.sourceUrl)} size="xs" type="button" variant="outline">
+                                Remove
+                              </Button>
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
+
+                  {sourceEntries.length > 0 && (
+                    <Button className="mt-3" onClick={clearSourceEntries} size="sm" type="button" variant="outline">
+                      Clear sources
+                    </Button>
+                  )}
+                </SidebarSection>
+              </>
             )}
-          </Box>
-        </VStack>
+          </SidebarContent>
+          </>
         )}
-      </Box>
+      </Sidebar>
 
-      {/* Player */}
-      <Box
-        flex="1"
-        p={sidebarOpen ? { base: 2, md: 6 } : { base: 1.5, md: 4 }}
-        minW={0}
-        w="100%"
-        h={{ base: sidebarOpen ? "50dvh" : "calc(100dvh - 44px)", lg: "100dvh" }}
-        overflow="hidden"
-      >
-        <VStack align="stretch" gap={sidebarOpen ? { base: 2, md: 4 } : { base: 1.5, md: 3 }} h="100%" minH={0}>
-          <HStack justify="space-between" align="start" gap={3} wrap="wrap">
-            <Box minW={0}>
-              <Heading size={{ base: "sm", md: "md" }} lineClamp={1}>
-                {selectedSourceLabel}
-              </Heading>
-            </Box>
-            <HStack gap={2} wrap="wrap" justify="end">
+      <SidebarInset className={cn(sidebarOpen ? "h-[42dvh] p-2 md:p-4 lg:h-dvh lg:p-5" : "h-[calc(100dvh-56px)] p-1.5 md:p-4 lg:h-dvh")}>
+        <div className="flex h-full min-h-0 flex-col gap-2 lg:gap-3">
+          <div className="flex min-h-8 shrink-0 flex-wrap items-start justify-between gap-2">
+            <h2 className="min-w-0 truncate text-base font-semibold md:text-lg">{selectedSourceLabel}</h2>
+            <div className="flex flex-wrap items-center justify-end gap-2">
               <Button
-                size="sm"
-                bg={castActive ? "red.600" : "#246b5a"}
-                color="white"
-                borderRadius="8px"
-                minW="38px"
-                px={2.5}
-                _hover={{ bg: castActive ? "red.700" : "#1b5547" }}
+                className={cn("px-2.5", castActive && "bg-red-600 hover:bg-red-700")}
                 disabled={castLoading || !castAvailable}
                 onClick={() => void toggleCastPlayback()}
-                aria-label={castActive ? "Stop cast" : "Cast video"}
+                size="sm"
                 title={castActive ? "Stop cast" : "Cast video"}
+                type="button"
               >
-                <CastIcon />
+                <Cast className="h-4 w-4" />
               </Button>
-              <Badge
-                bg={selected ? selectedStatusMeta.bg : "gray.100"}
-                color={selected ? selectedStatusMeta.color : "gray.600"}
-                borderWidth="1px"
-                borderColor={selected ? selectedStatusMeta.border : "gray.200"}
-                borderRadius="6px"
-              >
+              <Badge className={selected ? selectedStatusMeta.badge : "border-gray-200 bg-gray-100 text-gray-600"}>
                 {selected ? selectedStatusMeta.label : "Idle"}
               </Badge>
-            </HStack>
-          </HStack>
+            </div>
+          </div>
 
-          <Box
-            bg="white"
-            borderWidth="1px"
-            borderColor="gray.200"
-            borderRadius="lg"
-            p={{ base: 2, md: 3 }}
-            flex="1"
-            minH={0}
-            overflow="hidden"
-            display="flex"
-            alignItems="center"
-            justifyContent="center"
-          >
+          <Card className="flex min-h-0 flex-1 items-center justify-center overflow-hidden p-1.5 md:p-2 lg:p-3">
             {selected ? (
-              <Box
-                w="100%"
-                maxW={sidebarOpen ? "100%" : "calc((100dvh - 92px) * 16 / 9)"}
-                maxH="100%"
+              <div
+                className={cn(
+                  "w-full max-h-full",
+                  sidebarOpen
+                    ? "lg:max-w-[min(100%,calc((100dvh-104px)*16/9))]"
+                    : "max-w-[calc((100dvh-92px)*16/9)]"
+                )}
               >
-                <AspectRatio ratio={16 / 9} w="100%">
-                  <Box w="100%" h="100%">
-                    <VideoPlayer
-                      key={`${selected}-${playerRevision}`}
-                      src={selected}
-                      onStatusChange={handlePlayerStatusChange}
-                    />
-                  </Box>
-                </AspectRatio>
-              </Box>
+                <div className="aspect-video w-full">
+                  <VideoPlayer key={`${selected}-${playerRevision}`} src={selected} onStatusChange={handlePlayerStatusChange} />
+                </div>
+              </div>
             ) : (
-              <Text color="gray.500">Select an active source to play.</Text>
+              <p className="text-sm text-gray-500">Select an active source to play.</p>
             )}
-          </Box>
-        </VStack>
-      </Box>
-    </Flex>
+          </Card>
+        </div>
+      </SidebarInset>
+    </div>
   );
 }
